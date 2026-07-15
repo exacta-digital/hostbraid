@@ -1,0 +1,26 @@
+[package]
+name = "hostbraid"
+description = "A provider-neutral hosting environment CLI for people and agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hostbraid"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+clap_complete.workspace = true
+console.workspace = true
+hostbraid-core = { path = "../hostbraid-core" }
+indicatif.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+strsim.workspace = true
+
+[lints]
+workspace = true

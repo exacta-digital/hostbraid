@@ -1,9 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/hostbraid-cli",
   "crates/hostbraid-core",
 ]
-default-members = ["crates/hostbraid-core"]
+default-members = ["crates/hostbraid-cli"]
 
 [workspace.package]
 version = "0.1.0"
