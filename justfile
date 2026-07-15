@@ -26,6 +26,6 @@ test:
 run *args:
     cargo run -- {{args}}
 
-# Install the local development build in Cargo's bin directory.
+# Install the local development build as `hostbraid` and `hb`.
 install:
-    cargo install --path crates/hostbraid-cli --locked
+    cargo install --path crates/hostbraid-cli --locked --bins

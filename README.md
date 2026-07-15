@@ -43,14 +43,17 @@ cargo run -- search ssh
 cargo run -- --output json --no-input search environment
 ```
 
-Install the local build:
+Install the local build as both `hostbraid` and its short alias, `hb`:
 
 ```bash
-cargo install --path crates/hostbraid-cli --locked
+just install
+hostbraid --version
+hb --version
 hostbraid completion zsh > ~/.zfunc/_hostbraid
 ```
 
-If [`just`](https://github.com/casey/just) is installed, `just check` runs the complete local
+Without [`just`](https://github.com/casey/just), run
+`cargo install --path crates/hostbraid-cli --locked --bins`. `just check` runs the complete local
 handoff suite.
 
 ## Current commands

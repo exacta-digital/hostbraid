@@ -1,6 +1,7 @@
 [package]
 name = "hostbraid"
 description = "A provider-neutral hosting environment CLI for people and agents"
+default-run = "hostbraid"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +12,10 @@ publish.workspace = true
 [[bin]]
 name = "hostbraid"
 path = "src/main.rs"
+
+[[bin]]
+name = "hb"
+path = "src/bin/hb.rs"
 
 [dependencies]
 clap.workspace = true

@@ -2,7 +2,11 @@ use serde_json::Value;
 use std::process::{Command, Output};
 
 fn run(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_hostbraid"))
+    run_binary(env!("CARGO_BIN_EXE_hostbraid"), arguments)
+}
+
+fn run_binary(binary: &str, arguments: &[&str]) -> Output {
+    Command::new(binary)
         .args(arguments)
         .output()
         .expect("HostBraid binary runs")
@@ -17,13 +21,36 @@ fn json(output: &Output) -> Value {
 }
 
 #[test]
-fn no_arguments_gives_people_a_starting_point() {
+fn no_arguments_lists_every_command_category() {
     let output = run(&[]);
 
     assert!(output.status.success());
     let stdout = stdout(&output);
     assert!(stdout.contains("HostBraid"));
     assert!(stdout.contains("hostbraid guide getting-started"));
+
+    let mut root = hostbraid::command();
+    root.build();
+    for command in root
+        .get_subcommands()
+        .filter(|command| command.get_name() != "help" && !command.is_hide_set())
+    {
+        assert!(
+            stdout.contains(&format!("hostbraid {}", command.get_name())),
+            "default output omitted the `{}` command",
+            command.get_name()
+        );
+    }
+}
+
+#[test]
+fn hb_is_an_alias_for_the_hostbraid_binary() {
+    let output = run_binary(env!("CARGO_BIN_EXE_hb"), &["--output=json", "--version"]);
+
+    assert!(output.status.success());
+    let value = json(&output);
+    assert_eq!(value["command"], "cli.version");
+    assert_eq!(value["data"]["kind"], "version");
 }
 
 #[test]
