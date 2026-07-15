@@ -25,11 +25,16 @@ pub(crate) fn resolve_site(snapshot: &CatalogSnapshot, site_id: &str) -> Result<
         .filter(|site| site.site.reference.site_id.as_str() == site_id)
         .collect();
     match matches.as_slice() {
-        [] => Err(AppError::new(ErrorCode::NotFound, "site ID was not found")),
+        [] => Err(AppError::new(ErrorCode::NotFound, "site ID was not found").with_hint(
+            "Run `hb site list` for the selected profile and copy the exact site ID.",
+        )),
         [site] => Ok((*site).clone()),
         _ => Err(AppError::new(
             ErrorCode::AmbiguousTarget,
             "site ID matched more than one site",
+        )
+        .with_hint(
+            "Refresh with `hb site list`; if the exact ID is duplicated, retry later or report a provider catalog error.",
         )),
     }
 }
@@ -46,11 +51,17 @@ pub(crate) fn resolve_environment(
         [] => Err(AppError::new(
             ErrorCode::NotFound,
             "environment ID was not found",
+        )
+        .with_hint(
+            "Run `hb environment list --site-id <SITE_ID>` and copy the exact environment ID.",
         )),
         [environment] => Ok(environment.clone()),
         _ => Err(AppError::new(
             ErrorCode::AmbiguousTarget,
             "environment ID matched more than one environment",
+        )
+        .with_hint(
+            "Refresh the environment list; if the exact ID is duplicated, retry later or report a provider catalog error.",
         )),
     }
 }
@@ -106,7 +117,9 @@ pub(crate) fn select_environments(
             ErrorCode::NotFound,
             "no environments matched every selector category",
         )
-        .with_hint("Repeated selectors are ORed; different selector categories are ANDed."));
+        .with_hint(
+            "Remove or broaden one selector and retry. Repeated selectors are ORed; different selector categories are ANDed.",
+        ));
     }
 
     Ok(EnvironmentSelection {
@@ -130,7 +143,7 @@ pub(crate) fn validate_selection_syntax(arguments: &SshRunArgs) -> Result<()> {
             "at least one SSH target selector is required",
         )
         .with_hint(
-            "Use --environment-id, --site-id, --kind, --label, or the deliberate --all selector.",
+            "Use --environment-id, --site-id, --kind, --label, or the deliberate --all selector. Run `hb ssh run --help` for examples.",
         ));
     }
 
@@ -175,6 +188,9 @@ fn validate_requested_labels(snapshot: &CatalogSnapshot, requested: &[String]) -
             return Err(AppError::new(
                 ErrorCode::NotFound,
                 "site label was not found",
+            )
+            .with_hint(
+                "Run `hb site list` and use an exact listed label, or select targets by exact site or environment ID.",
             ));
         }
     }
@@ -190,6 +206,9 @@ fn validate_label_selector(value: &str) -> Result<()> {
         return Err(AppError::new(
             ErrorCode::InvalidInput,
             "site label selector is empty or malformed",
+        )
+        .with_hint(
+            "Copy an exact label from `hb site list`; labels cannot be empty, padded, or contain control characters.",
         ));
     }
     Ok(())
@@ -200,6 +219,9 @@ pub(crate) fn validate_opaque_selector(value: &str) -> Result<()> {
         AppError::new(
             ErrorCode::InvalidInput,
             "provider ID selector is empty or malformed",
+        )
+        .with_hint(
+            "Copy the exact opaque ID from the corresponding list command; display names and domains are not valid substitutes.",
         )
     })
 }
@@ -226,7 +248,9 @@ const fn kind(value: EnvironmentKindArg) -> EnvironmentKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_environment, select_environments, validate_selection_syntax};
+    use super::{
+        resolve_environment, resolve_site, select_environments, validate_selection_syntax,
+    };
     use crate::cli::{EnvironmentKindArg, ProfileSelectionArgs, SshRunArgs};
     use hostbraid_core::{
         CatalogSite, CatalogSnapshot, EnvironmentKind, EnvironmentRef, EnvironmentSummary,
@@ -333,11 +357,30 @@ mod tests {
 
     #[test]
     fn unknown_exact_ids_and_labels_are_rejected() {
-        assert!(resolve_environment(&snapshot(), "missing").is_err());
+        let missing_site = resolve_site(&snapshot(), "missing").expect_err("site is absent");
+        assert_eq!(
+            missing_site.hint(),
+            Some("Run `hb site list` for the selected profile and copy the exact site ID.")
+        );
+
+        let missing_environment =
+            resolve_environment(&snapshot(), "missing").expect_err("environment is absent");
+        assert_eq!(
+            missing_environment.hint(),
+            Some(
+                "Run `hb environment list --site-id <SITE_ID>` and copy the exact environment ID."
+            )
+        );
 
         let mut arguments = arguments();
         arguments.label = vec!["missing".to_owned()];
-        assert!(select_environments(&snapshot(), &arguments).is_err());
+        let missing_label =
+            select_environments(&snapshot(), &arguments).expect_err("label is absent");
+        assert!(
+            missing_label
+                .hint()
+                .is_some_and(|hint| hint.contains("`hb site list`"))
+        );
     }
 
     #[test]
@@ -348,12 +391,22 @@ mod tests {
             error.message(),
             "at least one SSH target selector is required"
         );
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("`hb ssh run --help`"))
+        );
 
         missing.environment_ids = vec![" leading-space".to_owned()];
         let error = validate_selection_syntax(&missing).expect_err("selector is malformed");
         assert_eq!(
             error.message(),
             "provider ID selector is empty or malformed"
+        );
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("exact opaque ID"))
         );
     }
 }

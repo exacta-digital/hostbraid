@@ -50,7 +50,8 @@ did not succeed, the failure envelope retains the ordered per-target report in `
   "command": "ssh.run",
   "error": {
     "code": "remote_execution_failed",
-    "message": "one or more remote commands failed"
+    "message": "one or more remote commands failed",
+    "hint": "Inspect each failed target's failure and captured stderr, correct local OpenSSH, provider SSH access, or the remote command, then retry only failed environments with exact --environment-id selectors."
   },
   "data": {
     "results": [
@@ -91,6 +92,15 @@ did not succeed, the failure envelope retains the ordered per-target report in `
 
 Pre-execution failures—invalid selectors, missing credentials, provider errors, or declined
 policy—continue to omit `data`.
+
+Every top-level CLI failure includes a non-empty, secret-safe `hint`. Error producers provide the
+most specific recovery action they know; the CLI presentation boundary supplies a code-aware
+fallback for rare errors without one. Parse failures use only the parser's structural error kind
+and exact comparisons against allowlisted command and argument identities. Parser context is never
+rendered. Diagnostics never reproduce unknown arguments, rejected values, or the raw parser
+message, because argv may contain an accidentally pasted credential. Per-target SSH failure objects
+keep their existing `code` and `message` shape; the enclosing failure provides the overall
+remediation.
 
 Fields may only be removed or have their meaning changed in a new schema version. Additive fields
 must not contain secrets. Canonical provider references are structured objects, not display strings.

@@ -66,7 +66,10 @@ impl ApiToken {
         if value.is_empty() || value.len() > 16 * 1024 || value.chars().any(char::is_control) {
             return Err(AppError::new(
                 ErrorCode::InvalidInput,
-                "Kinsta API token is empty or invalid",
+                "Kinsta API token must be non-empty, no longer than 16 KiB, and contain no control characters",
+            )
+            .with_hint(
+                "Provide a valid Kinsta API key through the configured credential source, then retry",
             ));
         }
         Ok(Self(value))
@@ -101,19 +104,14 @@ impl fmt::Debug for Transport {
 
 impl Transport {
     fn production(token: impl Into<String>) -> Result<Self> {
-        let base_url = Url::parse(PRODUCTION_BASE_URL).map_err(|_| {
-            AppError::new(
-                ErrorCode::Internal,
-                "Kinsta API endpoint configuration is invalid",
-            )
-        })?;
+        let base_url = Url::parse(PRODUCTION_BASE_URL)
+            .map_err(|_| internal_error("Kinsta API endpoint configuration is invalid"))?;
         Self::new(token, base_url, build_http_client()?)
     }
 
     fn new(token: impl Into<String>, base_url: Url, http: Client) -> Result<Self> {
         if base_url.cannot_be_a_base() {
-            return Err(AppError::new(
-                ErrorCode::Internal,
+            return Err(internal_error(
                 "Kinsta API endpoint configuration is invalid",
             ));
         }
@@ -126,12 +124,9 @@ impl Transport {
 
     fn endpoint(&self, segments: &[&str]) -> Result<Url> {
         let mut url = self.base_url.clone();
-        let mut path = url.path_segments_mut().map_err(|()| {
-            AppError::new(
-                ErrorCode::Internal,
-                "Kinsta API endpoint configuration is invalid",
-            )
-        })?;
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|()| internal_error("Kinsta API endpoint configuration is invalid"))?;
         path.pop_if_empty();
         path.extend(segments.iter().copied());
         drop(path);
@@ -197,7 +192,9 @@ impl Transport {
                 ErrorCode::AuthenticationFailed,
                 "Kinsta API token is not active",
             )
-            .with_hint("Create or activate a Kinsta API key and update the profile credential"));
+            .with_hint(
+                "Create or activate a Kinsta API key in MyKinsta, provide it through the chosen credential source, and retry",
+            ));
         }
         if response.expires_at.as_ref().is_some_and(|value| {
             value.len() > 128 || value.trim() != value || value.chars().any(char::is_control)
@@ -219,9 +216,17 @@ struct BoundedJson<T> {
     body_len: usize,
 }
 
+fn internal_error(message: &'static str) -> AppError {
+    AppError::new(ErrorCode::Internal, message).with_hint(
+        "Update HostBraid; if it is already current, report this error with its error code",
+    )
+}
+
 fn transport_error() -> AppError {
     AppError::new(ErrorCode::ProviderUnavailable, "Kinsta API request failed")
-        .with_hint("Check the network connection and try again")
+        .with_hint(
+            "Check the network connection and any proxy or firewall access to the Kinsta API, then retry; if it persists, check Kinsta service status",
+        )
 }
 
 fn build_http_client() -> Result<Client> {
@@ -231,45 +236,64 @@ fn build_http_client() -> Result<Client> {
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("hostbraid/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|_| {
-            AppError::new(
-                ErrorCode::Internal,
-                "could not initialize Kinsta API client",
-            )
-        })
+        .map_err(|_| internal_error("HostBraid could not initialize the Kinsta API client"))
 }
 
 fn map_http_status(status: StatusCode) -> AppError {
     match status {
-        StatusCode::BAD_REQUEST => {
-            AppError::new(ErrorCode::InvalidInput, "Kinsta rejected the API request")
-        }
+        StatusCode::BAD_REQUEST => AppError::new(
+            ErrorCode::InvalidInput,
+            "Kinsta rejected HostBraid's API request",
+        )
+        .with_hint(
+            "Update HostBraid and retry; if it persists, report the operation and error code",
+        ),
         StatusCode::UNAUTHORIZED => AppError::new(
             ErrorCode::AuthenticationFailed,
             "Kinsta API authentication failed",
         )
-        .with_hint("Update the profile credential with an active Kinsta API key"),
+        .with_hint(
+            "Create or activate a Kinsta API key in MyKinsta, provide it through the chosen credential source, and retry",
+        ),
         StatusCode::FORBIDDEN => AppError::new(
             ErrorCode::PolicyDenied,
             "Kinsta denied access to the requested resource",
         )
-        .with_hint("Check the API key role and company access"),
+        .with_hint(
+            "Use an API key that can access the configured Kinsta company and requested resource, or ask a company owner to grant access",
+        ),
         StatusCode::NOT_FOUND => AppError::new(
             ErrorCode::NotFound,
             "Kinsta resource was not found or is not accessible",
+        )
+        .with_hint(
+            "Verify that the resource still exists and the profile can access it, then refresh the provider catalog and retry",
+        ),
+        StatusCode::REQUEST_TIMEOUT => AppError::new(
+            ErrorCode::ProviderUnavailable,
+            "Kinsta API request timed out",
+        )
+        .with_hint(
+            "Retry the request; if it continues to time out, check the network connection and Kinsta service status",
         ),
         StatusCode::TOO_MANY_REQUESTS => AppError::new(
             ErrorCode::ProviderUnavailable,
             "Kinsta API rate limit was reached",
         )
-        .with_hint("Wait before retrying the request"),
+        .with_hint(
+            "Wait a few minutes before retrying; if this repeats, reduce concurrent requests",
+        ),
         status if status.is_server_error() => AppError::new(
             ErrorCode::ProviderUnavailable,
             "Kinsta API is temporarily unavailable",
-        ),
+        )
+        .with_hint("Retry in a few minutes; if it persists, check Kinsta service status"),
         _ => AppError::new(
             ErrorCode::ProviderUnavailable,
             "Kinsta API returned an unexpected status",
+        )
+        .with_hint(
+            "Update HostBraid and retry; if it persists, report the operation and error code",
         ),
     }
 }
@@ -279,7 +303,9 @@ fn provider_contract_error() -> AppError {
         ErrorCode::ProviderUnavailable,
         "Kinsta returned a response HostBraid could not understand",
     )
-    .with_hint("Update HostBraid and try again")
+    .with_hint(
+        "Retry once, then update HostBraid; if the error persists on the latest version, report the operation and error code",
+    )
 }
 
 fn inventory_timeout_error() -> AppError {
@@ -287,7 +313,9 @@ fn inventory_timeout_error() -> AppError {
         ErrorCode::ProviderUnavailable,
         "Kinsta inventory request timed out",
     )
-    .with_hint("Try the inventory request again")
+    .with_hint(
+        "Retry once; if inventory keeps timing out, check network access and Kinsta service status, then report the error code",
+    )
 }
 
 /// A company-bound Kinsta adapter using the fixed production API endpoint.
@@ -566,7 +594,8 @@ impl KinstaProvider {
         Err(AppError::new(
             ErrorCode::InvalidInput,
             "profile does not belong to the Kinsta provider",
-        ))
+        )
+        .with_hint("Choose a Kinsta profile, or use the adapter matching the profile's provider"))
     }
 
     fn ensure_environment(&self, environment: &EnvironmentRef) -> Result<()> {
@@ -576,7 +605,8 @@ impl KinstaProvider {
         Err(AppError::new(
             ErrorCode::InvalidInput,
             "environment does not belong to the Kinsta provider",
-        ))
+        )
+        .with_hint("Choose an environment belonging to a Kinsta profile, then retry"))
     }
 
     #[cfg(test)]
@@ -939,6 +969,26 @@ mod tests {
         })
     }
 
+    #[test]
+    fn malformed_api_tokens_are_secret_safe_and_actionable() {
+        let token = "secret-token-canary\n";
+        let error = ApiToken::new(token).expect_err("control characters must be rejected");
+        let rendered = format!("{error:?} {error}");
+
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert_eq!(
+            error.message(),
+            "Kinsta API token must be non-empty, no longer than 16 KiB, and contain no control characters"
+        );
+        assert_eq!(
+            error.hint(),
+            Some(
+                "Provide a valid Kinsta API key through the configured credential source, then retry"
+            )
+        );
+        assert!(!rendered.contains("secret-token-canary"));
+    }
+
     #[tokio::test]
     async fn authentication_derives_company_and_redacts_token() {
         let server = MockServer::start_async().await;
@@ -988,6 +1038,12 @@ mod tests {
             .await
             .expect_err("inactive key must fail");
         assert_eq!(error.code(), ErrorCode::AuthenticationFailed);
+        assert_eq!(
+            error.hint(),
+            Some(
+                "Create or activate a Kinsta API key in MyKinsta, provide it through the chosen credential source, and retry"
+            )
+        );
         assert!(!error.to_string().contains("safe-token"));
     }
 
@@ -1107,6 +1163,10 @@ mod tests {
             .expect_err("disabled SSH is unavailable");
 
         assert_eq!(error.code(), ErrorCode::Unavailable);
+        assert_eq!(
+            error.hint(),
+            Some("Enable SSH in MyKinsta before connecting")
+        );
         config.assert_hits_async(0).await;
     }
 
@@ -1144,6 +1204,12 @@ mod tests {
             .await
             .expect_err("invalid port fails safely");
         assert_eq!(error.code(), ErrorCode::ProviderUnavailable);
+        assert_eq!(
+            error.hint(),
+            Some(
+                "Retry once, then update HostBraid; if the error persists on the latest version, report the operation and error code"
+            )
+        );
     }
 
     #[tokio::test]
@@ -1613,6 +1679,12 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::ProviderUnavailable);
         assert_eq!(error.message(), "Kinsta inventory request timed out");
+        assert_eq!(
+            error.hint(),
+            Some(
+                "Retry once; if inventory keeps timing out, check network access and Kinsta service status, then report the error code"
+            )
+        );
     }
 
     #[tokio::test]
@@ -1660,22 +1732,71 @@ mod tests {
             .expect_err("rate limit fails");
         assert_eq!(error.code(), ErrorCode::ProviderUnavailable);
         assert_eq!(error.message(), "Kinsta API rate limit was reached");
+        assert_eq!(
+            error.hint(),
+            Some("Wait a few minutes before retrying; if this repeats, reduce concurrent requests")
+        );
     }
 
     #[test]
-    fn provider_statuses_map_to_stable_error_categories() {
-        assert_eq!(
-            map_http_status(StatusCode::NOT_FOUND).code(),
-            ErrorCode::NotFound
-        );
-        assert_eq!(
-            map_http_status(StatusCode::INTERNAL_SERVER_ERROR).code(),
-            ErrorCode::ProviderUnavailable
-        );
-        assert_eq!(
-            map_http_status(StatusCode::FORBIDDEN).code(),
-            ErrorCode::PolicyDenied
-        );
+    fn provider_statuses_have_stable_actionable_errors() {
+        let cases = [
+            (
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidInput,
+                "Kinsta rejected HostBraid's API request",
+                "Update HostBraid and retry; if it persists, report the operation and error code",
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                ErrorCode::AuthenticationFailed,
+                "Kinsta API authentication failed",
+                "Create or activate a Kinsta API key in MyKinsta, provide it through the chosen credential source, and retry",
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                ErrorCode::PolicyDenied,
+                "Kinsta denied access to the requested resource",
+                "Use an API key that can access the configured Kinsta company and requested resource, or ask a company owner to grant access",
+            ),
+            (
+                StatusCode::NOT_FOUND,
+                ErrorCode::NotFound,
+                "Kinsta resource was not found or is not accessible",
+                "Verify that the resource still exists and the profile can access it, then refresh the provider catalog and retry",
+            ),
+            (
+                StatusCode::REQUEST_TIMEOUT,
+                ErrorCode::ProviderUnavailable,
+                "Kinsta API request timed out",
+                "Retry the request; if it continues to time out, check the network connection and Kinsta service status",
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                ErrorCode::ProviderUnavailable,
+                "Kinsta API rate limit was reached",
+                "Wait a few minutes before retrying; if this repeats, reduce concurrent requests",
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::ProviderUnavailable,
+                "Kinsta API is temporarily unavailable",
+                "Retry in a few minutes; if it persists, check Kinsta service status",
+            ),
+            (
+                StatusCode::FOUND,
+                ErrorCode::ProviderUnavailable,
+                "Kinsta API returned an unexpected status",
+                "Update HostBraid and retry; if it persists, report the operation and error code",
+            ),
+        ];
+
+        for (status, code, message, hint) in cases {
+            let error = map_http_status(status);
+            assert_eq!(error.code(), code, "status {status}");
+            assert_eq!(error.message(), message, "status {status}");
+            assert_eq!(error.hint(), Some(hint), "status {status}");
+        }
     }
 
     #[tokio::test]
@@ -1695,6 +1816,67 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::ProviderUnavailable);
         assert_eq!(error.message(), "Kinsta API request failed");
+        assert_eq!(
+            error.hint(),
+            Some(
+                "Check the network connection and any proxy or firewall access to the Kinsta API, then retry; if it persists, check Kinsta service status"
+            )
+        );
+    }
+
+    #[test]
+    fn internal_endpoint_failures_offer_safe_escalation() {
+        let error = Transport::new(
+            "safe-token",
+            Url::parse("mailto:hostbraid@example.test").expect("valid non-base URL"),
+            build_http_client().expect("HTTP client initializes"),
+        )
+        .expect_err("a non-base URL cannot build API endpoints");
+
+        assert_eq!(error.code(), ErrorCode::Internal);
+        assert_eq!(
+            error.message(),
+            "Kinsta API endpoint configuration is invalid"
+        );
+        assert_eq!(
+            error.hint(),
+            Some(
+                "Update HostBraid; if it is already current, report this error with its error code"
+            )
+        );
+    }
+
+    #[test]
+    fn provider_reference_mismatches_offer_provider_scoped_remediation() {
+        let provider = KinstaProvider::for_company_at(
+            "safe-token",
+            "company_one",
+            Url::parse("https://example.test/v2").expect("valid base URL"),
+        )
+        .expect("provider initializes");
+        let foreign_profile =
+            ProviderProfileRef::try_new("other-host", "agency").expect("valid foreign profile");
+        let foreign_environment =
+            EnvironmentRef::try_new("other-host", "agency", "site_one", "env_live")
+                .expect("valid foreign environment");
+
+        let profile_error = provider
+            .ensure_profile(&foreign_profile)
+            .expect_err("a foreign profile must be rejected");
+        assert_eq!(profile_error.code(), ErrorCode::InvalidInput);
+        assert_eq!(
+            profile_error.hint(),
+            Some("Choose a Kinsta profile, or use the adapter matching the profile's provider")
+        );
+
+        let environment_error = provider
+            .ensure_environment(&foreign_environment)
+            .expect_err("a foreign environment must be rejected");
+        assert_eq!(environment_error.code(), ErrorCode::InvalidInput);
+        assert_eq!(
+            environment_error.hint(),
+            Some("Choose an environment belonging to a Kinsta profile, then retry")
+        );
     }
 
     #[test]

@@ -13,8 +13,10 @@ hostbraid --output json --no-input <command>
 ```
 
 The process emits one JSON object on stdout. Inspect `schema_version`, `ok`, `command`, `data`,
-`warnings`, and `meta`. On failure, inspect `error.code`, `error.message`, and optional `error.hint`,
-then respect the non-zero process status. Never parse human tables or terminal prose.
+`warnings`, and `meta`. On failure, inspect `error.code`, `error.message`, and the non-empty
+`error.hint`, then respect the non-zero process status. Never parse human tables or terminal prose.
+Parse diagnostics intentionally omit unknown and rejected argv values; use the curated hint instead
+of expecting the invalid value to be echoed.
 
 Provider-backed commands require either an exact `--profile provider:name` or a configured default
 profile. Non-interactive profile creation and credential rotation require `--token-stdin` or a

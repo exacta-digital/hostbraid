@@ -86,9 +86,11 @@ itself fail when the report was produced successfully.
 
 Clap provides contextual `--help`, aliases, environment-backed global options, and shell
 completions. Parse failures deliberately do not echo unrecognized values, because an accidentally
-pasted credential must not reappear in diagnostics. Automatic human output uses color and transient
-progress only on terminals; an explicit `--color always` overrides color detection. JSON mode never
-emits a spinner or prompt.
+pasted credential must not reappear in diagnostics. Instead, they report the safe, recognized
+command scope and offer an exact next action. Every top-level error includes secret-safe remediation
+in human output and `error.hint` in JSON. Automatic human output uses color and transient progress
+only on terminals; an explicit `--color always` overrides color detection. JSON mode never emits a
+spinner or prompt.
 
 ## Kinsta quick start
 

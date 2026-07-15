@@ -65,7 +65,9 @@ impl<'a> ProfileService<'a> {
                     ErrorCode::InvalidInput,
                     "no default provider profile is configured",
                 )
-                .with_hint("Pass --profile provider:name or run `hb use provider:name`.")
+                .with_hint(
+                    "Run `hb profiles`, then `hb use provider:name`; or create one with `hb login kinsta <name>`.",
+                )
             })?
         };
         configuration
@@ -93,11 +95,11 @@ impl<'a> ProfileService<'a> {
             if configuration.find(&reference).is_some() {
                 return Err(AppError::new(
                     ErrorCode::InvalidInput,
-                    "a profile with that exact reference already exists",
+                    "that provider profile is already configured",
                 )
                 .with_hint(format!(
-                    "Use `hostbraid profile credential set {}` to rotate its credential.",
-                    format_profile_ref(&reference)
+                    "Run `hb use {0}` to activate it, or `hb profile credential set {0}` to replace its credential.",
+                    format_profile_ref(&reference),
                 )));
             }
 
@@ -113,7 +115,7 @@ impl<'a> ProfileService<'a> {
         });
 
         if result.is_err() && keyring_written.get() && self.keyring.delete(&reference).is_err() {
-            return Err(rollback_failed());
+            return Err(add_rollback_failed(&reference));
         }
         result
     }
@@ -173,7 +175,10 @@ impl<'a> ProfileService<'a> {
                     ErrorCode::PolicyDenied,
                     "the replacement credential belongs to a different provider company",
                 )
-                .with_hint("Create a new profile for credentials belonging to another company."));
+                .with_hint(format!(
+                    "Keep this profile unchanged and run `hb login {} <new-name>` for the other company.",
+                    reference.provider
+                )));
             }
 
             let old_keyring = matches!(profile.credential_source, CredentialSource::Keyring);
@@ -201,7 +206,7 @@ impl<'a> ProfileService<'a> {
                         self.keyring.delete(reference)
                     };
                     if rollback.is_err() {
-                        return Err(rollback_failed());
+                        return Err(credential_rollback_failed(reference));
                     }
                 }
                 return Err(error);
@@ -224,19 +229,34 @@ fn profile_not_found() -> AppError {
         ErrorCode::NotFound,
         "the exact provider profile was not found",
     )
+    .with_hint("Run `hb profiles` and copy an exact provider:name reference.")
 }
 
-fn rollback_failed() -> AppError {
+fn add_rollback_failed(reference: &ProviderProfileRef) -> AppError {
     AppError::new(
         ErrorCode::Internal,
-        "the profile configuration was not changed, but credential rollback failed",
+        "the profile was not saved, and HostBraid could not remove the credential it staged",
     )
-    .with_hint("Run `hostbraid profile credential set provider:name` before using the profile.")
+    .with_hint(format!(
+        "Remove the HostBraid entry for {} from the OS credential manager, then retry `hb login`.",
+        format_profile_ref(reference)
+    ))
+}
+
+fn credential_rollback_failed(reference: &ProviderProfileRef) -> AppError {
+    AppError::new(
+        ErrorCode::Internal,
+        "profile metadata was not changed, but its OS credential may now be inconsistent",
+    )
+    .with_hint(format!(
+        "Immediately run `hb profile credential set {}` with the intended credential.",
+        format_profile_ref(reference)
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ProfileService;
+    use super::{ProfileService, add_rollback_failed, credential_rollback_failed};
     use crate::profiles::{
         ConfigPaths, CredentialCandidate, CredentialKeyring, CredentialSource, ProfileStore,
         SecretToken, ValidatedCredential, parse_profile_ref,
@@ -387,6 +407,11 @@ mod tests {
         );
         let error = service.select(None).expect_err("default is required");
         assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("hb profiles"))
+        );
     }
 
     #[test]
@@ -413,7 +438,80 @@ mod tests {
             )
             .expect_err("company change is rejected");
         assert_eq!(error.code(), ErrorCode::PolicyDenied);
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("hb login kinsta <new-name>"))
+        );
         assert_eq!(keyring.value(&reference).as_deref(), Some("old-secret"));
+    }
+
+    #[test]
+    fn missing_and_duplicate_profiles_offer_exact_reference_recovery() {
+        let directory = TestDirectory::new();
+        let store = ProfileStore::new(ConfigPaths::from_home(directory.path()));
+        let keyring = FakeKeyring::default();
+        let service = ProfileService::new(&store, &keyring);
+        let reference = parse_profile_ref("kinsta:agency").expect("reference");
+
+        let missing = service.show(&reference).expect_err("profile is missing");
+        assert!(
+            missing
+                .hint()
+                .is_some_and(|hint| hint.contains("hb profiles"))
+        );
+
+        service
+            .add(
+                reference.clone(),
+                &keyring_candidate("original-secret"),
+                validated("company-1"),
+                false,
+            )
+            .expect("add profile");
+        let duplicate = service
+            .add(
+                reference,
+                &keyring_candidate("replacement-secret"),
+                validated("company-1"),
+                false,
+            )
+            .expect_err("duplicate profile is rejected");
+        assert_eq!(
+            duplicate.message(),
+            "that provider profile is already configured"
+        );
+        assert!(
+            duplicate
+                .hint()
+                .is_some_and(|hint| hint.contains("hb use kinsta:agency"))
+        );
+        assert!(
+            duplicate
+                .hint()
+                .is_some_and(|hint| hint.contains("hb profile credential set kinsta:agency"))
+        );
+        assert!(!format!("{duplicate:?}").contains("replacement-secret"));
+    }
+
+    #[test]
+    fn rollback_failures_have_operation_specific_remediation() {
+        let reference = parse_profile_ref("kinsta:agency").expect("reference");
+
+        let add = add_rollback_failed(&reference);
+        assert!(add.message().contains("profile was not saved"));
+        assert!(
+            add.hint()
+                .is_some_and(|hint| hint.contains("OS credential manager"))
+        );
+
+        let rotation = credential_rollback_failed(&reference);
+        assert!(rotation.message().contains("may now be inconsistent"));
+        assert!(
+            rotation
+                .hint()
+                .is_some_and(|hint| hint.contains("hb profile credential set kinsta:agency"))
+        );
     }
 
     #[test]

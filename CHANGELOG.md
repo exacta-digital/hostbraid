@@ -22,3 +22,4 @@ intends to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   batch signal cancellation, optional timeout/fail-fast controls, and best-effort 60-second
   connection reuse.
 - Structured partial-failure JSON for captured SSH results.
+- Command-aware, secret-safe diagnostics with concrete remediation for every top-level CLI error.

@@ -10,7 +10,7 @@ pub(crate) fn run(arguments: CompletionArgs, context: &Context) -> Result<()> {
             ErrorCode::InvalidInput,
             "shell completion output is a script, not JSON",
         )
-        .with_hint("Run `hostbraid completion <shell>` without `--output json`."));
+        .with_hint("Run `hb completion <shell>` without `--output json`."));
     }
 
     let mut command = Cli::command();

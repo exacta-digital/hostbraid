@@ -7,6 +7,8 @@ artifact writes.
   Environment-backed profiles store the variable name, not its value.
 - New and replacement credentials are validated before their profile metadata is committed. A
   replacement credential must resolve to the same provider company; otherwise create a new profile.
+- Parse errors use only recognized command structure and never echo an unknown or rejected argv
+  value. Recovery hints remain useful without risking disclosure of an accidentally pasted token.
 - SSH uses existing OpenSSH keys, agents, configuration, jump hosts, and `known_hosts` behavior.
 - Provider-returned SSH command strings are not executed. Host, port, and user are consumed as typed
   values and passed as separate process arguments; unsupported working-directory changes fail

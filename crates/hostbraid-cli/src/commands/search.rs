@@ -7,6 +7,9 @@ use hostbraid_core::{AppError, ErrorCode, MachineWarning, Result};
 use serde::Serialize;
 use std::cmp::Ordering;
 
+const NO_MATCHES_MESSAGE: &str = "No commands or guides matched the query";
+const NO_MATCHES_HINT: &str = "Try a broader word or run `hb guide --list`.";
+
 #[derive(Debug)]
 struct SearchDocument {
     kind: SearchKind,
@@ -47,7 +50,7 @@ pub(crate) fn run(arguments: SearchArgs, context: &Context) -> Result<()> {
     if query.is_empty() {
         return Err(
             AppError::new(ErrorCode::InvalidInput, "search query cannot be empty")
-                .with_hint("Try `hostbraid search ssh` or `hostbraid guide --list`."),
+                .with_hint("Try `hb search ssh` or `hb guide --list`."),
         );
     }
 
@@ -73,10 +76,7 @@ pub(crate) fn run(arguments: SearchArgs, context: &Context) -> Result<()> {
     results.truncate(usize::from(arguments.limit));
 
     let warnings = if results.is_empty() {
-        vec![MachineWarning::new(
-            "no_matches",
-            format!("No commands or guides matched `{query}`"),
-        )]
+        vec![MachineWarning::new("no_matches", NO_MATCHES_MESSAGE)]
     } else {
         Vec::new()
     };
@@ -86,17 +86,10 @@ pub(crate) fn run(arguments: SearchArgs, context: &Context) -> Result<()> {
     }
 
     if results.is_empty() {
-        return output::write_human(&format!(
-            "No commands or guides matched {}.\nTry a broader word or run `hostbraid guide --list`.\n",
-            console::style(query).yellow()
-        ));
+        return output::write_human(&format!("{NO_MATCHES_MESSAGE}.\n{NO_MATCHES_HINT}\n"));
     }
 
-    let mut contents = format!(
-        "{} {}\n\n",
-        console::style("Results for").dim(),
-        console::style(query).cyan().bold()
-    );
+    let mut contents = format!("{}\n\n", console::style("Search results").cyan().bold());
     for result in results {
         contents.push_str(&format!(
             "  {}  {}\n      {}\n      {}\n\n",
@@ -186,7 +179,7 @@ fn score(query: &str, document: &SearchDocument) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{SearchDocument, SearchKind, score};
+    use super::{NO_MATCHES_HINT, NO_MATCHES_MESSAGE, SearchDocument, SearchKind, score};
 
     fn document() -> SearchDocument {
         SearchDocument {
@@ -207,6 +200,19 @@ mod tests {
     #[test]
     fn unrelated_query_does_not_match() {
         assert_eq!(score("pineapple", &document()), 0);
+    }
+
+    #[test]
+    fn no_match_diagnostics_never_echo_the_query() {
+        let secret_canary = "secret-token-canary-never-render";
+
+        assert!(!NO_MATCHES_MESSAGE.contains(secret_canary));
+        assert!(!NO_MATCHES_HINT.contains(secret_canary));
+        assert_eq!(
+            NO_MATCHES_MESSAGE,
+            "No commands or guides matched the query"
+        );
+        assert!(NO_MATCHES_HINT.contains("hb guide --list"));
     }
 
     #[test]

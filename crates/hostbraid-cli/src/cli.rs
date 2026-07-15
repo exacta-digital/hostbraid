@@ -1,5 +1,6 @@
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use hostbraid_core::{AppError, ErrorCode};
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::time::Duration;
@@ -579,15 +580,291 @@ pub enum ColorChoice {
 }
 
 pub(crate) fn try_parse_from(arguments: &[OsString]) -> Result<Cli, clap::Error> {
-    let binary_name = arguments
-        .first()
-        .and_then(|argument| Path::new(argument).file_stem())
-        .filter(|name| *name == OsStr::new("hb"))
-        .map_or("hostbraid", |_| "hb");
+    let binary_name = invoked_binary_name(arguments);
     let matches = Cli::command()
         .bin_name(binary_name)
         .try_get_matches_from(arguments)?;
     Cli::from_arg_matches(&matches)
+}
+
+pub(crate) fn parse_app_error(arguments: &[OsString], error: &clap::Error) -> AppError {
+    use clap::error::ErrorKind;
+
+    let binary = invoked_binary_name(arguments);
+    let command = safe_command_path(arguments);
+    let is_login = command.ends_with(" login");
+    let accepts_credentials = is_login
+        || command.ends_with(" profile add")
+        || command.ends_with(" profile credential set");
+
+    let (message, hint) = match error.kind() {
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if is_login
+                && error_targets_any(error, &["<NAME>"])
+                && !error_targets_any(error, &["<PROVIDER>"]) => (
+                    "login requires a local profile name".to_owned(),
+                    format!(
+                        "Run `{command} kinsta <name>` (for example, `{command} kinsta agency`). The name is local metadata and never contains the API token."
+                    ),
+                ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if is_login && error_targets_any(error, &["<PROVIDER>", "<NAME>"]) => (
+                "login requires a provider and local profile name".to_owned(),
+                format!(
+                    "Run `{command} kinsta <name>` to enter a token securely (for example, `{command} kinsta agency`), or `{command} --help` for non-interactive credential options."
+                ),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if command.ends_with(" use") && error_targets_any(error, &["<PROFILE>"]) => (
+                "use requires an exact provider:name profile reference".to_owned(),
+                format!(
+                    "Run `{} profiles` to list exact references, then `{command} provider:name`.",
+                    binary
+                ),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if command.ends_with(" logout") && error_targets_any(error, &["<PROFILE>"]) => (
+                "logout requires an exact provider:name profile reference".to_owned(),
+                format!(
+                    "Run `{} profiles` to review exact references, then `{command} provider:name`; HostBraid will ask for confirmation.",
+                    binary
+                ),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if command.ends_with(" ssh run")
+                && error_targets_any(error, &["<REMOTE_COMMAND>..."]) => (
+                "ssh run requires a remote command after `--`".to_owned(),
+                format!(
+                    "For example: `{command} --environment-id <ID> -- uptime`. Run `{command} --help` for target selectors."
+                ),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if command.ends_with(" environment list")
+                && error_targets_any(error, &["--site-id <SITE_ID>"]) => (
+                "environment list requires an exact site ID".to_owned(),
+                format!(
+                    "Run `{binary} site list`, copy an exact site ID, then pass `--site-id <ID>`."
+                ),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if (command.ends_with(" environment show") || command.ends_with(" ssh open"))
+                && error_targets_any(error, &["--environment-id <ENVIRONMENT_ID>"]) => (
+                format!("`{command}` requires an exact environment ID"),
+                format!(
+                    "Run `{binary} environment list --site-id <SITE_ID>`, copy an exact environment ID, then pass `--environment-id <ID>`."
+                ),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if command.ends_with(" search") && error_targets_any(error, &["<QUERY>"]) => (
+                "search requires a query".to_owned(),
+                format!("For example: `{command} ssh`, or run `{binary} guide --list`."),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues
+            if command.ends_with(" completion") && error_targets_any(error, &["<SHELL>"]) => (
+                "completion requires a shell name".to_owned(),
+                format!(
+                    "Run `{command} --help` to list supported shells, then redirect the generated script into your shell's completion setup."
+                ),
+            ),
+        ErrorKind::MissingRequiredArgument
+        | ErrorKind::TooFewValues
+        | ErrorKind::WrongNumberOfValues => (
+            format!("`{command}` is missing required input"),
+            format!(
+                "Run `{command} --help` to see the required arguments, accepted formats, and examples."
+            ),
+        ),
+        ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            if command.ends_with(" profile") => (
+                "profile requires a subcommand".to_owned(),
+                format!(
+                    "Use `{} login`, `{} profiles`, `{} use`, or `{} logout` for common account tasks; run `{command} --help` for advanced profile management.",
+                    binary, binary, binary, binary,
+                ),
+            ),
+        ErrorKind::MissingSubcommand | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => (
+            format!("`{command}` requires a subcommand"),
+            format!("Run `{command} --help` to list the available subcommands and examples."),
+        ),
+        ErrorKind::UnknownArgument | ErrorKind::TooManyValues if accepts_credentials => (
+            format!("`{command}` received an unexpected argument or option"),
+            format!(
+                "API tokens are never accepted as ordinary arguments. Run `{command} --help`; use the hidden prompt, `--token-stdin`, or `--credential-env <NAME>`."
+            ),
+        ),
+        ErrorKind::UnknownArgument | ErrorKind::TooManyValues => (
+            format!("`{command}` received an unrecognized argument or option"),
+            format!("Run `{command} --help` to review the accepted arguments and examples."),
+        ),
+        ErrorKind::InvalidSubcommand if command == binary => (
+            "HostBraid did not recognize that command".to_owned(),
+            format!(
+                "Run `{} --help` to list commands, or `{} search <term>` to find one.",
+                binary, binary
+            ),
+        ),
+        ErrorKind::InvalidSubcommand => (
+            format!("`{command}` does not recognize that subcommand"),
+            format!(
+                "Run `{command} --help` to list subcommands, or `{} search <term>` to find a command.",
+                binary
+            ),
+        ),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation
+            if is_login && error_targets_any(error, &["<PROVIDER>"]) => (
+                "login received a provider or option value that is not accepted".to_owned(),
+                format!(
+                    "This build supports `kinsta`. Run `{command} kinsta <name>`, or `{command} --help` to review accepted values."
+                ),
+            ),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation
+            if command.ends_with(" ssh run")
+                && error_targets_any(error, &["--jobs <JOBS>"]) => (
+                    "--jobs must be an integer between 1 and 64".to_owned(),
+                    format!("Choose a value from 1 through 64, then retry `{command}`."),
+                ),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation
+            if command.ends_with(" ssh run")
+                && error_targets_any(error, &["--timeout <TIMEOUT>"]) => (
+                    "--timeout must be a positive duration".to_owned(),
+                    "Use a value such as `30s`, `5m`, or `1h`; zero is not accepted.".to_owned(),
+                ),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => (
+            format!("`{command}` received a value that is not accepted"),
+            format!("Run `{command} --help` to review accepted values and formats."),
+        ),
+        ErrorKind::ArgumentConflict if accepts_credentials => (
+            format!("`{command}` received conflicting credential options"),
+            format!(
+                "Choose one credential source: the hidden prompt, `--token-stdin`, or `--credential-env <NAME>`. Run `{command} --help` for examples."
+            ),
+        ),
+        ErrorKind::ArgumentConflict => (
+            format!("`{command}` received options that cannot be used together"),
+            format!("Run `{command} --help` to review which options conflict."),
+        ),
+        ErrorKind::NoEquals => (
+            format!("`{command}` requires `=` for one option value"),
+            format!("Run `{command} --help` to see the required option syntax."),
+        ),
+        ErrorKind::InvalidUtf8 => (
+            "command-line arguments contain text that is not valid UTF-8".to_owned(),
+            format!(
+                "Retype the command using valid text, or run `{command} --help` to review accepted arguments."
+            ),
+        ),
+        ErrorKind::Io | ErrorKind::Format => (
+            "HostBraid could not read the command-line arguments".to_owned(),
+            "Retry in a normal terminal. If the problem persists, update HostBraid and report the error code."
+                .to_owned(),
+        ),
+        _ => (
+            format!("HostBraid could not parse `{command}`"),
+            format!("Run `{command} --help` and retry using the documented syntax."),
+        ),
+    };
+
+    AppError::new(ErrorCode::InvalidArguments, message).with_hint(hint)
+}
+
+fn invoked_binary_name(arguments: &[OsString]) -> &'static str {
+    arguments
+        .first()
+        .and_then(|argument| Path::new(argument).file_stem())
+        .filter(|name| *name == OsStr::new("hb"))
+        .map_or("hostbraid", |_| "hb")
+}
+
+fn safe_command_path(arguments: &[OsString]) -> String {
+    let mut root = Cli::command();
+    root.build();
+    let mut command = &root;
+    let mut path = vec![invoked_binary_name(arguments).to_owned()];
+    let mut index = 1;
+
+    while let Some((candidate, next_index)) = next_subcommand_candidate(arguments, index) {
+        let Some(subcommand) = command.get_subcommands().find(|subcommand| {
+            subcommand.get_name() == candidate
+                || subcommand.get_all_aliases().any(|alias| alias == candidate)
+        }) else {
+            break;
+        };
+        if subcommand.get_name() == "help" {
+            break;
+        }
+        path.push(subcommand.get_name().to_owned());
+        command = subcommand;
+        index = next_index;
+    }
+
+    path.join(" ")
+}
+
+fn next_subcommand_candidate(arguments: &[OsString], mut index: usize) -> Option<(&str, usize)> {
+    while index < arguments.len() {
+        let argument = arguments[index].to_str()?;
+        if argument == "--" {
+            return None;
+        }
+        if matches!(argument, "--output" | "--color") {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if argument.starts_with("--output=") || argument.starts_with("--color=") {
+            index += 1;
+            continue;
+        }
+        if matches!(argument, "--no-input" | "--quiet" | "--help" | "--version") {
+            index += 1;
+            continue;
+        }
+        if argument.starts_with('-') && !argument.starts_with("--") {
+            let scan = scan_short_options(
+                argument,
+                arguments.get(index + 1).and_then(|value| value.to_str()),
+            );
+            if !scan.known {
+                return None;
+            }
+            index += usize::from(scan.consumes_next) + 1;
+            continue;
+        }
+        if argument.starts_with('-') {
+            return None;
+        }
+        return Some((argument, index + 1));
+    }
+    None
+}
+
+fn error_targets_any(error: &clap::Error, allowlist: &[&str]) -> bool {
+    use clap::error::{ContextKind, ContextValue};
+
+    match error.get(ContextKind::InvalidArg) {
+        Some(ContextValue::String(argument)) => allowlist.contains(&argument.as_str()),
+        Some(ContextValue::Strings(arguments)) => arguments
+            .iter()
+            .any(|argument| allowlist.contains(&argument.as_str())),
+        _ => false,
+    }
 }
 
 pub(crate) fn machine_output_requested(arguments: &[OsString]) -> bool {

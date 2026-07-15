@@ -33,6 +33,10 @@ use hostbraid_provider_kinsta::KinstaProvider;
 use serde::Serialize;
 use std::collections::VecDeque;
 
+const SSH_BATCH_REMEDIATION: &str = "Inspect each failed target's failure and captured stderr, correct local OpenSSH, provider SSH access, or the remote command, then retry only failed environments with exact `--environment-id` selectors.";
+const SSH_TIMEOUT_REMEDIATION: &str = "Inspect every failed target and captured stderr. For timed-out targets, increase `--timeout` or make the remote command finish sooner. The local SSH connection was closed, but remote descendants may still be running.";
+const SSH_CANCELLATION_REMEDIATION: &str = "Inspect every failed target and review which targets completed before rerunning. HostBraid stopped its local SSH clients, but verify remote state before repeating a non-idempotent command.";
+
 pub(crate) async fn run(command: Commands, context: &Context) -> Result<CommandOutcome> {
     match command {
         Commands::Login(arguments) => add_profile(arguments.into(), context).await,
@@ -48,6 +52,9 @@ pub(crate) async fn run(command: Commands, context: &Context) -> Result<CommandO
             Err(AppError::new(
                 ErrorCode::Internal,
                 "a non-provider command reached the provider dispatcher",
+            )
+            .with_hint(
+                "Retry once; if this repeats, report the command and `hb --version` output without including secrets.",
             ))
         }
     }
@@ -109,11 +116,11 @@ async fn add_profile(arguments: ProfileAddArgs, context: &Context) -> Result<Com
     if store.load()?.find(&reference).is_some() {
         return Err(AppError::new(
             ErrorCode::InvalidInput,
-            "a profile with that exact reference already exists",
+            "that provider profile is already configured",
         )
         .with_hint(format!(
-            "Use `hostbraid profile credential set {}` to rotate its credential.",
-            format_profile_ref(&reference)
+            "Run `hb use {0}` to activate it, or `hb profile credential set {0}` to replace its credential.",
+            format_profile_ref(&reference),
         )));
     }
 
@@ -214,6 +221,9 @@ fn remove_profile(arguments: ProfileRemoveArgs, context: &Context) -> Result<Com
             return Err(AppError::new(
                 ErrorCode::PolicyDenied,
                 "profile removal was not confirmed",
+            )
+            .with_hint(
+                "No profile was removed. Rerun and confirm, or pass `--yes` after reviewing the exact provider:name reference.",
             ));
         }
     }
@@ -250,7 +260,8 @@ async fn set_profile_credential(
         return Err(AppError::new(
             ErrorCode::Unsupported,
             "credential rotation is not implemented for the selected provider",
-        ));
+        )
+        .with_hint("Use a compiled provider profile or update HostBraid before retrying."));
     }
     let candidate = collect_credential(
         arguments.token_stdin,
@@ -351,7 +362,8 @@ fn kinsta_session(selection: &ProfileSelectionArgs) -> Result<KinstaSession> {
         return Err(AppError::new(
             ErrorCode::Unsupported,
             "the selected profile uses a provider that is not compiled into this build",
-        ));
+        )
+        .with_hint("Run `hb profiles`, select a compiled provider profile, or update HostBraid."));
     }
     let token = resolve_credential(&profile, &keyring, &ProcessEnvironment)?;
     let provider = KinstaProvider::for_company(token.expose_secret(), profile.company_id.as_str())?;
@@ -534,14 +546,14 @@ async fn open_ssh(arguments: SshOpenArgs, context: &Context) -> Result<CommandOu
             ErrorCode::Unsupported,
             "interactive SSH cannot be represented as JSON",
         )
-        .with_hint("Run `hostbraid ssh open` with human output in a terminal."));
+        .with_hint("Run `hb ssh open` with human output in a terminal."));
     }
     if !context.interactive {
         return Err(AppError::new(
             ErrorCode::InvalidInput,
             "interactive SSH requires an input terminal",
         )
-        .with_hint("Run `hostbraid ssh open` in a terminal without `--no-input`."));
+        .with_hint("Run `hb ssh open` in a terminal without `--no-input`."));
     }
     validate_opaque_selector(&arguments.environment_id)?;
 
@@ -621,14 +633,19 @@ async fn run_remote_command(arguments: SshRunArgs, context: &Context) -> Result<
             ExecutionState::TimedOut => Err(AppError::new(
                 ErrorCode::RemoteExecutionFailed,
                 "the SSH command exceeded its timeout",
-            )),
+            )
+            .with_hint(SSH_TIMEOUT_REMEDIATION)),
             ExecutionState::Cancelled => Err(AppError::new(
                 ErrorCode::RemoteExecutionFailed,
                 "the SSH command was cancelled",
-            )),
+            )
+            .with_hint(SSH_CANCELLATION_REMEDIATION)),
             ExecutionState::Skipped => Err(AppError::new(
                 ErrorCode::Internal,
                 "a single SSH command was unexpectedly skipped",
+            )
+            .with_hint(
+                "Retry without `--fail-fast`; if this repeats, report the command and `hb --version` output.",
             )),
         };
     }
@@ -666,10 +683,7 @@ async fn run_remote_command(arguments: SshRunArgs, context: &Context) -> Result<
             output::write_machine_success("ssh.run", &data, warnings)?;
             return Ok(CommandOutcome::Success);
         }
-        let error = AppError::new(
-            ErrorCode::RemoteExecutionFailed,
-            "one or more remote commands failed",
-        );
+        let error = ssh_batch_failure(&report);
         output::write_machine_partial_failure("ssh.run", &error, &data, warnings)?;
         return Ok(CommandOutcome::Exit(signal_exit_code.unwrap_or(1)));
     }
@@ -714,6 +728,9 @@ fn confirm_selection(
         Err(AppError::new(
             ErrorCode::PolicyDenied,
             "remote command execution was not confirmed",
+        )
+        .with_hint(
+            "No remote command was started. Rerun and confirm, or pass `--yes` only after reviewing the target preview.",
         ))
     }
 }
@@ -814,8 +831,9 @@ async fn ssh_targets(
                 ready.push(ExecutionTarget { environment, ssh });
                 failures.push(None);
             }
-            Err(_) => failures.push(Some(crate::ssh::TargetExecution::target_unavailable(
+            Err(error) => failures.push(Some(crate::ssh::TargetExecution::target_unavailable(
                 environment,
+                &error,
             ))),
         }
     }
@@ -929,7 +947,36 @@ fn render_batch_report(report: &BatchReport, selection: &EnvironmentSelection) -
         contents.push('\n');
         output::write_human(&contents)?;
     }
+    if !report.succeeded() {
+        output::write_human(&format!("hint: {}\n", ssh_batch_remediation(report)))?;
+    }
     Ok(())
+}
+
+fn ssh_batch_failure(report: &BatchReport) -> AppError {
+    AppError::new(
+        ErrorCode::RemoteExecutionFailed,
+        "one or more remote commands failed",
+    )
+    .with_hint(ssh_batch_remediation(report))
+}
+
+fn ssh_batch_remediation(report: &BatchReport) -> &'static str {
+    if report
+        .results
+        .iter()
+        .any(|result| result.state == ExecutionState::Cancelled)
+    {
+        SSH_CANCELLATION_REMEDIATION
+    } else if report
+        .results
+        .iter()
+        .any(|result| result.state == ExecutionState::TimedOut)
+    {
+        SSH_TIMEOUT_REMEDIATION
+    } else {
+        SSH_BATCH_REMEDIATION
+    }
 }
 
 fn append_captured_stream(contents: &mut String, label: &str, stream: &crate::ssh::CapturedStream) {
@@ -1012,7 +1059,8 @@ fn filter_inventory(
         return Err(AppError::new(
             ErrorCode::InvalidInput,
             "inventory search text cannot be empty",
-        ));
+        )
+        .with_hint("Pass non-whitespace text to `--search`, or omit `--search` entirely."));
     }
     let mut components = inventory.components;
     components.retain(|component| {
@@ -1046,7 +1094,8 @@ fn validate_inventory_arguments(arguments: &InventoryListArgs) -> Result<()> {
         return Err(AppError::new(
             ErrorCode::InvalidInput,
             "inventory search text cannot be empty",
-        ));
+        )
+        .with_hint("Pass non-whitespace text to `--search`, or omit `--search` entirely."));
     }
     Ok(())
 }
@@ -1100,15 +1149,24 @@ fn render_inventory(inventory: &MachineInventoryData, details: bool) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{PreparedSshTargets, filter_inventory};
+    use super::{PreparedSshTargets, filter_inventory, ssh_batch_failure, ssh_batch_remediation};
     use crate::cli::{InventoryListArgs, ProfileSelectionArgs};
     use crate::ssh::{
-        BatchReport, ExecutionFailureCode, ExecutionState, ExecutionTarget, TargetExecution,
+        BatchReport, CaptureEncoding, CapturedStream, ExecutionFailureCode, ExecutionState,
+        ExecutionTarget, TargetExecution,
     };
     use hostbraid_core::{
-        EnvironmentRef, SshTarget, WordPressComponent, WordPressComponentInstallation,
-        WordPressComponentInventory, WordPressComponentKind,
+        AppError, EnvironmentRef, ErrorCode, SshTarget, WordPressComponent,
+        WordPressComponentInstallation, WordPressComponentInventory, WordPressComponentKind,
     };
+
+    fn provider_ssh_error() -> AppError {
+        AppError::new(
+            ErrorCode::Unavailable,
+            "SSH is disabled for this provider environment",
+        )
+        .with_hint("Enable SSH in the provider dashboard before connecting.")
+    }
 
     fn component(slug: &str, updates: u64, vulnerable: bool) -> WordPressComponent {
         WordPressComponent {
@@ -1193,18 +1251,38 @@ mod tests {
         }
     }
 
+    fn report_with_state(state: ExecutionState) -> BatchReport {
+        let empty = || CapturedStream {
+            encoding: CaptureEncoding::Text,
+            data: String::new(),
+            truncated: false,
+            captured_bytes: 0,
+        };
+        BatchReport::from_results(vec![TargetExecution {
+            environment: execution_target("env-state").environment,
+            state,
+            exit_code: None,
+            duration_ms: 0,
+            stdout: empty(),
+            stderr: empty(),
+            failure: None,
+        }])
+    }
+
     #[test]
     fn preflight_failures_merge_in_selection_order_and_honor_fail_fast() {
         let first = execution_target("env-1");
         let second_environment =
             EnvironmentRef::try_new("kinsta", "agency", "site", "env-2").expect("environment");
         let third = execution_target("env-3");
+        let provider_error = provider_ssh_error();
         let mut prepared = PreparedSshTargets {
             ready: vec![first.clone(), third],
             failures: vec![
                 None,
                 Some(TargetExecution::target_unavailable(
                     second_environment.clone(),
+                    &provider_error,
                 )),
                 None,
             ],
@@ -1218,7 +1296,7 @@ mod tests {
         );
 
         let report = prepared.merge(Some(BatchReport::from_results(vec![
-            TargetExecution::target_unavailable(first.environment),
+            TargetExecution::target_unavailable(first.environment, &provider_error),
         ])));
         assert_eq!(report.results.len(), 3);
         assert_eq!(
@@ -1243,5 +1321,41 @@ mod tests {
                 .map(|failure| failure.code),
             Some(ExecutionFailureCode::FailFast)
         );
+    }
+
+    #[test]
+    fn partial_ssh_failures_offer_specific_batch_remediation() {
+        let provider_error = provider_ssh_error();
+        let report = BatchReport::from_results(vec![TargetExecution::target_unavailable(
+            execution_target("env-1").environment,
+            &provider_error,
+        )]);
+
+        assert_eq!(
+            ssh_batch_failure(&report).hint(),
+            Some(ssh_batch_remediation(&report))
+        );
+        assert!(ssh_batch_remediation(&report).contains("exact `--environment-id` selectors"));
+
+        assert!(
+            ssh_batch_remediation(&report_with_state(ExecutionState::TimedOut))
+                .contains("remote descendants may still be running")
+        );
+        assert!(
+            ssh_batch_remediation(&report_with_state(ExecutionState::Cancelled))
+                .contains("review which targets completed")
+        );
+
+        let mut timed_out = report_with_state(ExecutionState::TimedOut).results;
+        timed_out.extend(report_with_state(ExecutionState::Failed).results);
+        let mixed_timeout = BatchReport::from_results(timed_out);
+        assert!(ssh_batch_remediation(&mixed_timeout).contains("Inspect every failed target"));
+        assert!(ssh_batch_remediation(&mixed_timeout).contains("timed-out targets"));
+
+        let mut cancelled = report_with_state(ExecutionState::Cancelled).results;
+        cancelled.extend(report_with_state(ExecutionState::Failed).results);
+        let mixed_cancellation = BatchReport::from_results(cancelled);
+        assert!(ssh_batch_remediation(&mixed_cancellation).contains("Inspect every failed target"));
+        assert!(ssh_batch_remediation(&mixed_cancellation).contains("verify remote state"));
     }
 }

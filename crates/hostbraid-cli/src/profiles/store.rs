@@ -18,6 +18,12 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 const CONFIG_FILE_NAME: &str = "profiles.json";
 const LOCK_FILE_NAME: &str = ".profiles.lock";
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const CONFIG_ACCESS_HINT: &str = "Check that the HostBraid config directory is accessible and owned by your user. Set `HOSTBRAID_CONFIG_HOME` to a private directory if needed.";
+const CONFIG_WRITE_HINT: &str =
+    "Check that the HostBraid config directory is owned by your user and writable, then retry.";
+const CONFIG_REPAIR_HINT: &str =
+    "Back up profiles.json, then repair it or move it aside; recreate profiles with `hb login`.";
+const CONFIG_SAFETY_HINT: &str = "Move the unsafe path aside and recreate it as a real directory or file owned by your user; HostBraid will not follow symlinks.";
 #[cfg(any(test, target_os = "windows"))]
 const BACKUP_EXTENSION: &str = "json.previous";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -132,11 +138,15 @@ impl ProfileStore {
         let home = self.prepare_home()?;
         let lock = self.open_lock(&home)?;
         #[cfg(target_os = "windows")]
-        FileExt::lock_exclusive(&lock)
-            .map_err(|error| AppError::io("failed to lock profile configuration", &error))?;
+        FileExt::lock_exclusive(&lock).map_err(|error| {
+            AppError::io("failed to lock profile configuration", &error)
+                .with_hint(CONFIG_ACCESS_HINT)
+        })?;
         #[cfg(not(target_os = "windows"))]
-        FileExt::lock_shared(&lock)
-            .map_err(|error| AppError::io("failed to lock profile configuration", &error))?;
+        FileExt::lock_shared(&lock).map_err(|error| {
+            AppError::io("failed to lock profile configuration", &error)
+                .with_hint(CONFIG_ACCESS_HINT)
+        })?;
         #[cfg(target_os = "windows")]
         self.recover_interrupted_replacement()?;
         self.load_unlocked(&home)
@@ -148,8 +158,10 @@ impl ProfileStore {
     ) -> Result<T> {
         let home = self.prepare_home()?;
         let lock = self.open_lock(&home)?;
-        FileExt::lock_exclusive(&lock)
-            .map_err(|error| AppError::io("failed to lock profile configuration", &error))?;
+        FileExt::lock_exclusive(&lock).map_err(|error| {
+            AppError::io("failed to lock profile configuration", &error)
+                .with_hint(CONFIG_ACCESS_HINT)
+        })?;
 
         #[cfg(target_os = "windows")]
         self.recover_interrupted_replacement()?;
@@ -166,6 +178,7 @@ impl ProfileStore {
                 "failed to create the profile configuration directory",
                 &error,
             )
+            .with_hint(CONFIG_WRITE_HINT)
         })?;
         open_and_secure_home(&self.paths.home)
     }
@@ -211,7 +224,8 @@ impl ProfileStore {
                 return Err(AppError::io(
                     "failed to open the profile configuration",
                     &std::io::Error::from(error),
-                ));
+                )
+                .with_hint(CONFIG_ACCESS_HINT));
             }
         };
         secure_open_regular_file(&file, "profile configuration file")?;
@@ -227,10 +241,10 @@ impl ProfileStore {
                 return Ok(ProfileConfig::default());
             }
             Err(error) => {
-                return Err(AppError::io(
-                    "failed to open the profile configuration",
-                    &error,
-                ));
+                return Err(
+                    AppError::io("failed to open the profile configuration", &error)
+                        .with_hint(CONFIG_ACCESS_HINT),
+                );
             }
         };
         secure_file_permissions(&self.paths.config)?;
@@ -243,12 +257,18 @@ impl ProfileStore {
                 ErrorCode::Internal,
                 "failed to serialize the profile configuration",
             )
+            .with_hint(
+                "Retry once. If it repeats, update HostBraid and report the failure with `hb --version`.",
+            )
         })?;
         contents.push(b'\n');
         if contents.len() > MAX_CONFIG_BYTES as usize {
             return Err(AppError::new(
                 ErrorCode::InvalidInput,
-                "profile configuration is larger than the supported limit",
+                "the profile change would exceed the supported configuration size",
+            )
+            .with_hint(
+                "The change was not saved. Remove unneeded profiles or reduce stored metadata, then retry.",
             ));
         }
         write_configuration(
@@ -567,7 +587,8 @@ fn validate_directory(path: &Path) -> Result<()> {
     Err(AppError::new(
         ErrorCode::Io,
         "profile configuration directory is not a safe directory",
-    ))
+    )
+    .with_hint(CONFIG_SAFETY_HINT))
 }
 
 #[cfg(not(unix))]
@@ -581,7 +602,8 @@ fn validate_regular_file(path: &Path) -> Result<()> {
     Err(AppError::new(
         ErrorCode::Io,
         "profile configuration path is not a safe regular file",
-    ))
+    )
+    .with_hint(CONFIG_SAFETY_HINT))
 }
 
 #[cfg(not(unix))]
@@ -590,7 +612,8 @@ fn reject_existing_symlink(path: &Path, description: &str) -> Result<()> {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(AppError::new(
             ErrorCode::Io,
             format!("{description} must not be a symbolic link"),
-        )),
+        )
+        .with_hint(CONFIG_SAFETY_HINT)),
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(AppError::io(
@@ -651,7 +674,8 @@ fn secure_open_directory(directory: &File) -> Result<()> {
         return Err(AppError::new(
             ErrorCode::Io,
             "profile configuration directory is not a safe directory",
-        ));
+        )
+        .with_hint(CONFIG_SAFETY_HINT));
     }
     validate_unix_owner(&metadata, "profile configuration directory")?;
     directory
@@ -673,7 +697,8 @@ fn secure_open_directory(directory: &File) -> Result<()> {
         return Err(AppError::new(
             ErrorCode::Io,
             "profile configuration directory permissions could not be secured",
-        ));
+        )
+        .with_hint(CONFIG_SAFETY_HINT));
     }
     Ok(())
 }
@@ -687,7 +712,8 @@ fn secure_open_regular_file(file: &File, description: &str) -> Result<()> {
         return Err(AppError::new(
             ErrorCode::Io,
             format!("{description} is not a safe regular file"),
-        ));
+        )
+        .with_hint(CONFIG_SAFETY_HINT));
     }
     validate_unix_owner(&metadata, description)?;
     file.set_permissions(fs::Permissions::from_mode(0o600))
@@ -700,7 +726,8 @@ fn secure_open_regular_file(file: &File, description: &str) -> Result<()> {
         return Err(AppError::new(
             ErrorCode::Io,
             format!("{description} permissions could not be secured"),
-        ));
+        )
+        .with_hint(CONFIG_SAFETY_HINT));
     }
     Ok(())
 }
@@ -713,7 +740,8 @@ fn validate_unix_owner(metadata: &fs::Metadata, description: &str) -> Result<()>
     Err(AppError::new(
         ErrorCode::Io,
         format!("{description} is not owned by the current user"),
-    ))
+    )
+    .with_hint(CONFIG_SAFETY_HINT))
 }
 
 fn read_configuration(file: File) -> Result<ProfileConfig> {
@@ -725,7 +753,8 @@ fn read_configuration(file: File) -> Result<ProfileConfig> {
         return Err(AppError::new(
             ErrorCode::InvalidInput,
             "profile configuration is larger than the supported limit",
-        ));
+        )
+        .with_hint(CONFIG_REPAIR_HINT));
     }
 
     let mut contents = Zeroizing::new(Vec::with_capacity(usize::try_from(length).unwrap_or(0)));
@@ -736,14 +765,15 @@ fn read_configuration(file: File) -> Result<ProfileConfig> {
         return Err(AppError::new(
             ErrorCode::InvalidInput,
             "profile configuration is larger than the supported limit",
-        ));
+        )
+        .with_hint(CONFIG_REPAIR_HINT));
     }
     let mut configuration: ProfileConfig = serde_json::from_slice(&contents).map_err(|_| {
         AppError::new(
             ErrorCode::InvalidInput,
             "profile configuration is not valid HostBraid JSON",
         )
-        .with_hint("Repair or remove the profile configuration file, then retry.")
+        .with_hint(CONFIG_REPAIR_HINT)
     })?;
     configuration.normalize_and_validate()?;
     Ok(configuration)
@@ -872,6 +902,16 @@ mod tests {
             .expect_err("oversized configuration is rejected");
 
         assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("The change was not saved"))
+        );
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("Remove unneeded profiles"))
+        );
         assert!(!paths.config_file().exists());
         assert!(
             fs::read_dir(paths.home())
@@ -931,6 +971,11 @@ mod tests {
         let store = ProfileStore::new(paths);
 
         let error = store.load().expect_err("unknown secret field is rejected");
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("Back up profiles.json"))
+        );
         assert!(!format!("{error:?}").contains("secret-canary"));
         assert!(!error.to_string().contains("secret-canary"));
     }

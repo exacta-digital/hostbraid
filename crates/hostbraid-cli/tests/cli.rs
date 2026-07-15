@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static CONFIG_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -77,6 +77,22 @@ fn stdout(output: &Output) -> String {
 
 fn json(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON value")
+}
+
+fn assert_error_has_remediation(value: &Value) {
+    assert_eq!(value["ok"], false);
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.trim().is_empty()),
+        "error message was empty: {value}"
+    );
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| !hint.trim().is_empty()),
+        "error remediation was empty: {value}"
+    );
 }
 
 #[test]
@@ -226,19 +242,236 @@ fn search_has_a_versioned_machine_contract() {
 }
 
 #[test]
+fn empty_search_results_do_not_echo_a_possible_secret_query() {
+    let canary = "search-secret-canary-never-render";
+    let machine = run(&["search", canary, "--output=json"]);
+
+    assert!(machine.status.success());
+    assert!(!stdout(&machine).contains(canary));
+    let value = json(&machine);
+    assert_eq!(value["warnings"][0]["code"], "no_matches");
+
+    let human = run(&["search", canary]);
+    assert!(human.status.success());
+    assert!(!stdout(&human).contains(canary));
+    assert!(!String::from_utf8_lossy(&human.stderr).contains(canary));
+}
+
+#[test]
 fn parse_failures_are_json_when_machine_mode_was_requested() {
-    let output = run(&["--output", "json", "definitely-not-a-command"]);
+    let canary = "definitely-not-a-command-secret-canary";
+    let output = run(&["--output", "json", canary]);
 
     assert_eq!(output.status.code(), Some(2));
     let value = json(&output);
-    assert_eq!(value["ok"], false);
+    assert_error_has_remediation(&value);
     assert_eq!(value["command"], "cli.parse");
     assert_eq!(value["error"]["code"], "invalid_arguments");
     assert_eq!(
         value["error"]["message"],
-        "command-line arguments were invalid"
+        "HostBraid did not recognize that command"
     );
-    assert!(!stdout(&output).contains("definitely-not-a-command"));
+    assert!(!stdout(&output).contains(canary));
+}
+
+#[test]
+fn bare_login_explains_the_required_secure_flow_in_human_and_machine_modes() {
+    let human = run_binary(env!("CARGO_BIN_EXE_hb"), &["login"]);
+
+    assert_eq!(human.status.code(), Some(2));
+    assert!(human.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(stderr.contains("login requires a provider and local profile name"));
+    assert!(stderr.contains("hb login kinsta <name>"));
+    assert!(stderr.contains("hb login kinsta agency"));
+
+    let machine = run_binary(env!("CARGO_BIN_EXE_hb"), &["--output=json", "login"]);
+    assert_eq!(machine.status.code(), Some(2));
+    let value = json(&machine);
+    assert_error_has_remediation(&value);
+    assert_eq!(value["command"], "cli.parse");
+    assert_eq!(
+        value["error"]["message"],
+        "login requires a provider and local profile name"
+    );
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("hb login kinsta <name>"))
+    );
+}
+
+#[test]
+fn login_with_a_provider_explains_only_the_missing_profile_name() {
+    let output = run_binary(
+        env!("CARGO_BIN_EXE_hb"),
+        &["login", "kinsta", "--output=json"],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    let value = json(&output);
+    assert_error_has_remediation(&value);
+    assert_eq!(
+        value["error"]["message"],
+        "login requires a local profile name"
+    );
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("hb login kinsta agency"))
+    );
+}
+
+#[test]
+fn structural_parse_errors_are_specific_without_echoing_values() {
+    let canary = "parse-value-secret-canary-never-render";
+    let cases: &[(&[&str], &str, &str)] = &[
+        (
+            &["login", canary, "agency", "--output=json"],
+            "login received a provider or option value that is not accepted",
+            "supports `kinsta`",
+        ),
+        (
+            &[
+                "--output=json",
+                "login",
+                "kinsta",
+                "agency",
+                "--color",
+                canary,
+            ],
+            "`hb login` received a value that is not accepted",
+            "`hb login --help`",
+        ),
+        (
+            &[
+                "login",
+                "kinsta",
+                "agency",
+                "--credential-env",
+                "--output=json",
+            ],
+            "`hb login` received a value that is not accepted",
+            "`hb login --help`",
+        ),
+        (
+            &[
+                "login",
+                "kinsta",
+                "agency",
+                "--token-stdin",
+                "--credential-env",
+                canary,
+                "--output=json",
+            ],
+            "received conflicting credential options",
+            "Choose one credential source",
+        ),
+        (
+            &["profile", "--output=json"],
+            "profile requires a subcommand",
+            "advanced profile management",
+        ),
+        (
+            &[
+                "--output=json",
+                "ssh",
+                "run",
+                "--jobs",
+                "0",
+                "--environment-id",
+                "env-1",
+                "--",
+                "uptime",
+            ],
+            "--jobs must be an integer between 1 and 64",
+            "Choose a value from 1 through 64",
+        ),
+        (
+            &[
+                "--output=json",
+                "ssh",
+                "run",
+                "--timeout",
+                "0s",
+                "--environment-id",
+                "env-1",
+                "--",
+                "uptime",
+            ],
+            "--timeout must be a positive duration",
+            "Use a value such as `30s`",
+        ),
+        (
+            &[
+                "--output=json",
+                "ssh",
+                "run",
+                "--jobs",
+                "8",
+                "--timeout",
+                canary,
+                "--environment-id",
+                "env-1",
+                "--",
+                "uptime",
+            ],
+            "--timeout must be a positive duration",
+            "Use a value such as `30s`",
+        ),
+        (
+            &[
+                "--output=json",
+                "ssh",
+                "run",
+                "--jobs",
+                "8",
+                "--kind",
+                canary,
+                "--environment-id",
+                "env-1",
+                "--",
+                "uptime",
+            ],
+            "`hb ssh run` received a value that is not accepted",
+            "`hb ssh run --help`",
+        ),
+        (
+            &[
+                "--output=json",
+                "ssh",
+                "run",
+                "--timeout",
+                "0s",
+                "--environment-id",
+                "env-1",
+                "--",
+                "--jobs",
+            ],
+            "--timeout must be a positive duration",
+            "Use a value such as `30s`",
+        ),
+    ];
+
+    for (arguments, expected_message, expected_hint) in cases {
+        let output = run_binary(env!("CARGO_BIN_EXE_hb"), arguments);
+        assert_eq!(output.status.code(), Some(2));
+        let value = json(&output);
+        assert_error_has_remediation(&value);
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(expected_message)),
+            "unexpected parse message: {value}"
+        );
+        assert!(
+            value["error"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains(expected_hint)),
+            "unexpected parse remediation: {value}"
+        );
+        assert!(!stdout(&output).contains(canary));
+    }
 }
 
 #[test]
@@ -252,7 +485,8 @@ fn explicit_human_output_overrides_a_machine_environment_default() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("command-line arguments were invalid")
+        String::from_utf8_lossy(&output.stderr)
+            .contains("HostBraid did not recognize that command")
     );
     assert!(!String::from_utf8_lossy(&output.stderr).contains("definitely-not-a-command"));
 }
@@ -309,7 +543,7 @@ fn malformed_prefixes_do_not_expose_trailing_remote_output_options() {
     ]);
     assert_eq!(human.status.code(), Some(2));
     assert!(human.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&human.stderr).contains("command-line arguments were invalid"));
+    assert!(String::from_utf8_lossy(&human.stderr).contains("unrecognized argument or option"));
 
     let nested = Command::new(env!("CARGO_BIN_EXE_hostbraid"))
         .args([
@@ -388,6 +622,7 @@ fn runtime_failures_keep_their_command_identity() {
 
     assert_eq!(output.status.code(), Some(2));
     let value = json(&output);
+    assert_error_has_remediation(&value);
     assert_eq!(value["ok"], false);
     assert_eq!(value["command"], "completion");
     assert_eq!(value["error"]["code"], "invalid_input");
@@ -456,6 +691,35 @@ fn login_requires_a_safe_credential_source_before_network_access() {
 }
 
 #[test]
+fn duplicate_login_explains_how_to_activate_or_recredential_the_profile() {
+    let config_home = TestConfigHome::new();
+    write_environment_profile(&config_home, false);
+    let output = run_with_config(
+        &["login", "kinsta", "agency", "--output=json"],
+        &config_home,
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    let value = json(&output);
+    assert_error_has_remediation(&value);
+    assert_eq!(value["command"], "profile.add");
+    assert_eq!(
+        value["error"]["message"],
+        "that provider profile is already configured"
+    );
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("hb use kinsta:agency"))
+    );
+    assert!(
+        value["error"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("hb profile credential set kinsta:agency"))
+    );
+}
+
+#[test]
 fn profiles_uses_the_canonical_secret_free_machine_contract() {
     let config_home = TestConfigHome::new();
     let output = run_with_config(&["profiles", "--output=json"], &config_home);
@@ -465,6 +729,41 @@ fn profiles_uses_the_canonical_secret_free_machine_contract() {
     assert_eq!(value["command"], "profile.list");
     assert_eq!(value["data"]["default_profile"], Value::Null);
     assert_eq!(value["data"]["profiles"], serde_json::json!([]));
+}
+
+#[test]
+fn runtime_errors_always_offer_secret_safe_remediation() {
+    let config_home = TestConfigHome::new();
+    let canary = "missing-profile-secret-canary";
+    let output = run_with_config(&["use", canary, "--output=json"], &config_home);
+
+    assert_eq!(output.status.code(), Some(2));
+    let value = json(&output);
+    assert_error_has_remediation(&value);
+    assert_eq!(value["command"], "profile.default");
+    assert_eq!(value["error"]["code"], "invalid_input");
+    assert!(!stdout(&output).contains(canary));
+}
+
+#[test]
+fn machine_output_write_failures_fall_back_to_complete_stderr_remediation() {
+    let config_home = TestConfigHome::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hostbraid"))
+        .args(["profiles", "--output=json"])
+        .env("HOSTBRAID_CONFIG_HOME", config_home.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("HostBraid binary starts");
+    drop(child.stdout.take());
+    let output = child.wait_with_output().expect("HostBraid binary exits");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("failed to write machine output"));
+    assert!(stderr.contains("code: io"));
+    assert!(stderr.contains("hint:"));
+    assert!(stderr.contains("stdout is open and writable"));
 }
 
 #[test]

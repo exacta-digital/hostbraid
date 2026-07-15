@@ -51,33 +51,35 @@ pub fn main_entry() -> ExitCode {
                 });
                 if let Err(write_error) = output::write_machine_success(command, &data, Vec::new())
                 {
-                    eprintln!("error: {write_error}");
+                    report_emergency_error(&write_error);
                     return ExitCode::FAILURE;
                 }
                 return exit_code(code);
             }
             if let Err(print_error) = error.print() {
-                eprintln!("error: failed to write help: {print_error}");
+                report_emergency_error(
+                    &AppError::io("failed to write help", &print_error).with_hint(
+                        "Check that the output stream is open and writable, then retry.",
+                    ),
+                );
                 return ExitCode::FAILURE;
             }
             return exit_code(code);
         }
         Err(error) => {
             let code = error.exit_code();
-            // Clap diagnostics can include arbitrary argv values. Since users occasionally paste
-            // credentials in the wrong position, never render the raw parser error in any mode.
-            let app_error = AppError::new(
-                ErrorCode::InvalidArguments,
-                "command-line arguments were invalid",
-            )
-            .with_hint("Run `hostbraid --help` or `hostbraid search <term>`.");
+            // The mapper uses Clap's structural error kind plus exact comparisons against
+            // allowlisted command and argument identities. Never render parser context or Clap's
+            // raw diagnostic: either can contain arbitrary argv values, including credentials
+            // pasted in the wrong position.
+            let app_error = cli::parse_app_error(&arguments, &error);
             if machine_requested {
                 if let Err(write_error) = output::write_machine_error("cli.parse", &app_error) {
-                    eprintln!("error: {write_error}");
+                    report_emergency_error(&write_error);
                     return ExitCode::FAILURE;
                 }
             } else if let Err(write_error) = output::write_human_error(&app_error) {
-                eprintln!("error: {write_error}");
+                report_emergency_error(&write_error);
                 return ExitCode::FAILURE;
             }
             return exit_code(code);
@@ -121,10 +123,22 @@ pub fn main_entry() -> ExitCode {
         Ok(CommandOutcome::Exit(code)) => ExitCode::from(code),
         Err(error) => {
             if let Err(write_error) = output::write_error(&context, command_name, &error) {
-                eprintln!("error: {write_error}");
+                report_emergency_error(&write_error);
                 return ExitCode::FAILURE;
             }
             ExitCode::from(error.code().exit_code())
+        }
+    }
+}
+
+fn report_emergency_error(error: &AppError) {
+    if output::write_human_error(error).is_err() {
+        // There is no remaining reliable output channel. Make one final best-effort write with
+        // the complete curated diagnostic rather than silently dropping its code and hint.
+        eprintln!("error: {}", error.message());
+        eprintln!("  code: {}", error.code());
+        if let Some(hint) = error.hint().filter(|hint| !hint.trim().is_empty()) {
+            eprintln!("  hint: {hint}");
         }
     }
 }

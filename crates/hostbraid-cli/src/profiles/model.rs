@@ -4,6 +4,8 @@ use hostbraid_core::{
 use serde::{Deserialize, Serialize};
 
 pub(crate) const CONFIG_SCHEMA_VERSION: u32 = 1;
+const CONFIG_REPAIR_HINT: &str =
+    "Back up profiles.json, then repair it or move it aside; recreate profiles with `hb login`.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -73,7 +75,9 @@ impl ProfileConfig {
                 ErrorCode::Unsupported,
                 "profile configuration uses an unsupported schema version",
             )
-            .with_hint("Upgrade HostBraid before changing this profile configuration."));
+            .with_hint(
+                "Install a HostBraid version that supports this profile file before running profile or provider commands.",
+            ));
         }
 
         self.profiles.sort_by(|left, right| {
@@ -85,15 +89,22 @@ impl ProfileConfig {
 
         for profile in &self.profiles {
             if let CredentialSource::Environment { variable } = &profile.credential_source {
-                validate_environment_variable(variable)?;
+                validate_environment_variable(variable).map_err(|_| {
+                    AppError::new(
+                        ErrorCode::InvalidInput,
+                        "profile configuration contains an invalid credential environment variable",
+                    )
+                    .with_hint(CONFIG_REPAIR_HINT)
+                })?;
             }
             if profile.credential_expires_at.as_ref().is_some_and(|value| {
                 value.len() > 128 || value.trim() != value || value.chars().any(char::is_control)
             }) {
                 return Err(AppError::new(
                     ErrorCode::InvalidInput,
-                    "credential expiry metadata is invalid",
-                ));
+                    "profile configuration contains invalid credential expiry metadata",
+                )
+                .with_hint(CONFIG_REPAIR_HINT));
             }
         }
 
@@ -105,7 +116,8 @@ impl ProfileConfig {
             return Err(AppError::new(
                 ErrorCode::InvalidInput,
                 "profile configuration contains a duplicate profile reference",
-            ));
+            )
+            .with_hint(CONFIG_REPAIR_HINT));
         }
 
         if self
@@ -116,7 +128,8 @@ impl ProfileConfig {
             return Err(AppError::new(
                 ErrorCode::InvalidInput,
                 "the configured default profile does not exist",
-            ));
+            )
+            .with_hint(CONFIG_REPAIR_HINT));
         }
 
         Ok(())
@@ -134,13 +147,11 @@ impl ValidatedCredential {
         if expires_at.as_ref().is_some_and(|value| {
             value.len() > 128 || value.trim() != value || value.chars().any(char::is_control)
         }) {
-            return Err(AppError::new(
-                ErrorCode::InvalidInput,
-                "credential expiry metadata is invalid",
-            ));
+            return Err(invalid_provider_credential_metadata());
         }
         Ok(Self {
-            company_id: OpaqueId::new(company_id)?,
+            company_id: OpaqueId::new(company_id)
+                .map_err(|_| invalid_provider_credential_metadata())?,
             expires_at,
         })
     }
@@ -173,7 +184,7 @@ pub(crate) fn validate_environment_variable(value: &str) -> Result<()> {
             "credential environment variable name is invalid",
         )
         .with_hint(
-            "Use an ASCII environment name containing only letters, digits, and underscores.",
+            "Use 1–128 ASCII letters, digits, or underscores, and do not start with a digit.",
         ));
     }
     Ok(())
@@ -184,6 +195,17 @@ fn invalid_profile_reference() -> AppError {
         ErrorCode::InvalidInput,
         "profile reference must use the exact provider:name form",
     )
+    .with_hint("For example, `kinsta:agency`. Run `hb profiles` to list valid references.")
+}
+
+fn invalid_provider_credential_metadata() -> AppError {
+    AppError::new(
+        ErrorCode::InvalidInput,
+        "the provider returned credential metadata HostBraid could not validate",
+    )
+    .with_hint(
+        "Update HostBraid and retry; if it repeats, report the provider compatibility issue.",
+    )
 }
 
 fn same_reference(left: &ProviderProfileRef, right: &ProviderProfileRef) -> bool {
@@ -193,8 +215,8 @@ fn same_reference(left: &ProviderProfileRef, right: &ProviderProfileRef) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        CONFIG_SCHEMA_VERSION, CredentialSource, ProfileConfig, ProfileRecord, format_profile_ref,
-        parse_profile_ref,
+        CONFIG_SCHEMA_VERSION, CredentialSource, ProfileConfig, ProfileRecord, ValidatedCredential,
+        format_profile_ref, parse_profile_ref, validate_environment_variable,
     };
     use hostbraid_core::{ErrorCode, OpaqueId, ProfileName, ProviderId};
 
@@ -223,6 +245,11 @@ mod tests {
         ] {
             let error = parse_profile_ref(invalid).expect_err("reference is invalid");
             assert_eq!(error.code(), ErrorCode::InvalidInput);
+            assert!(
+                error
+                    .hint()
+                    .is_some_and(|hint| hint.contains("hb profiles"))
+            );
             assert!(!error.message().contains(invalid));
         }
     }
@@ -240,7 +267,14 @@ mod tests {
         assert_eq!(configuration.profiles[0].name.as_str(), "alpha");
 
         configuration.profiles.push(profile("alpha"));
-        assert!(configuration.normalize_and_validate().is_err());
+        let error = configuration
+            .normalize_and_validate()
+            .expect_err("duplicates are rejected");
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("Back up profiles.json"))
+        );
     }
 
     #[test]
@@ -255,5 +289,37 @@ mod tests {
             .normalize_and_validate()
             .expect_err("missing default is rejected");
         assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(error.hint().is_some_and(|hint| hint.contains("hb login")));
+    }
+
+    #[test]
+    fn invalid_environment_names_explain_the_complete_safe_grammar() {
+        let invalid = "SECRET=token-canary";
+        let error = validate_environment_variable(invalid).expect_err("name is invalid");
+
+        assert!(error.hint().is_some_and(|hint| hint.contains("1–128")));
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("do not start with a digit"))
+        );
+        assert!(!error.message().contains(invalid));
+        assert!(!error.hint().is_some_and(|hint| hint.contains(invalid)));
+    }
+
+    #[test]
+    fn invalid_provider_credential_metadata_has_provider_remediation() {
+        let invalid = "secret-company-canary\n";
+        let error =
+            ValidatedCredential::new(invalid, None).expect_err("provider metadata is invalid");
+
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("Update HostBraid"))
+        );
+        assert!(!error.message().contains(invalid));
+        assert!(!error.hint().is_some_and(|hint| hint.contains(invalid)));
     }
 }

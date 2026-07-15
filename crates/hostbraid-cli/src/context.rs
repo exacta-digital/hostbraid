@@ -59,22 +59,63 @@ impl Context {
         if !self.interactive {
             return Err(AppError::new(
                 ErrorCode::PolicyDenied,
-                "the operation requires explicit non-interactive confirmation",
+                "HostBraid cannot ask for confirmation because input is non-interactive",
             )
-            .with_hint("Review the selected targets, then rerun with `--yes`."));
+            .with_hint("Rerun in a terminal, or add `--yes` after reviewing the action."));
         }
 
         let mut stderr = io::stderr().lock();
         write!(stderr, "{prompt} [y/N] ")
             .and_then(|()| stderr.flush())
-            .map_err(|error| AppError::io("failed to write confirmation prompt", &error))?;
+            .map_err(|error| {
+                AppError::io("failed to write confirmation prompt", &error).with_hint(
+                    "Check that the terminal is available, then retry with `--yes` only after reviewing the action.",
+                )
+            })?;
         let mut answer = String::new();
         io::stdin()
             .read_line(&mut answer)
-            .map_err(|error| AppError::io("failed to read confirmation", &error))?;
+            .map_err(|error| {
+                AppError::io("failed to read confirmation", &error).with_hint(
+                    "Check that standard input is available, then retry with `--yes` only after reviewing the action.",
+                )
+            })?;
         Ok(matches!(
             answer.trim().to_ascii_lowercase().as_str(),
             "y" | "yes"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Context;
+    use crate::cli::{ColorChoice, OutputFormat};
+    use hostbraid_core::ErrorCode;
+
+    #[test]
+    fn non_interactive_confirmation_explains_both_safe_recovery_paths() {
+        let context = Context {
+            output: OutputFormat::Human,
+            interactive: false,
+            quiet: true,
+            color: ColorChoice::Never,
+        };
+
+        let error = context
+            .confirm("Remove profile?")
+            .expect_err("non-interactive confirmation must be explicit");
+
+        assert_eq!(error.code(), ErrorCode::PolicyDenied);
+        assert_eq!(
+            error.message(),
+            "HostBraid cannot ask for confirmation because input is non-interactive"
+        );
+        assert_eq!(
+            error.hint(),
+            Some("Rerun in a terminal, or add `--yes` after reviewing the action.")
+        );
+        assert!(!error.message().contains("target"));
+        assert!(!error.hint().is_some_and(|hint| hint.contains("target")));
     }
 }

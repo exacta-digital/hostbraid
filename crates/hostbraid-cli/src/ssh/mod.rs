@@ -141,7 +141,9 @@ impl Drop for ProcessSignalGuard {
 }
 
 fn map_signal_error(error: io::Error) -> AppError {
-    AppError::io("failed to install SSH cancellation signal handlers", &error)
+    AppError::io("failed to install SSH cancellation signal handlers", &error).with_hint(
+        "Retry the command. If this persists, update HostBraid and report the error code and operating system.",
+    )
 }
 
 /// Execution controls shared by one-shot inherited-stdio commands.
@@ -224,6 +226,14 @@ impl ExecutionFailure {
             message: message.into(),
         }
     }
+
+    fn from_app_error(code: ExecutionFailureCode, error: &AppError) -> Self {
+        let message = error.hint().map_or_else(
+            || error.message().to_owned(),
+            |hint| format!("{}; remediation: {hint}", error.message()),
+        );
+        Self { code, message }
+    }
 }
 
 /// Result of a one-shot command whose standard streams were inherited.
@@ -295,7 +305,7 @@ pub(crate) struct TargetExecution {
 }
 
 impl TargetExecution {
-    pub(crate) fn target_unavailable(environment: EnvironmentRef) -> Self {
+    pub(crate) fn target_unavailable(environment: EnvironmentRef, error: &AppError) -> Self {
         Self {
             environment,
             state: ExecutionState::Failed,
@@ -303,9 +313,9 @@ impl TargetExecution {
             duration_ms: 0,
             stdout: CapturedStream::empty(),
             stderr: CapturedStream::empty(),
-            failure: Some(ExecutionFailure::new(
+            failure: Some(ExecutionFailure::from_app_error(
                 ExecutionFailureCode::TargetUnavailable,
-                "SSH access is unavailable for this environment",
+                error,
             )),
         }
     }
@@ -411,6 +421,9 @@ impl ControlPool {
                 ErrorCode::Io,
                 "could not create a secure SSH multiplexing directory",
             )
+            .with_hint(
+                "Retry with `--no-pool`, or choose an owner-only directory with a short path.",
+            )
         })?;
         Ok(Self {
             control_path: Some(control_path),
@@ -484,7 +497,8 @@ impl OpenSsh {
             Err(AppError::new(
                 ErrorCode::DependencyMissing,
                 "the local SSH client did not pass its availability check",
-            ))
+            )
+            .with_hint("Run `hb doctor`, then install or repair OpenSSH before retrying."))
         }
     }
 
@@ -500,6 +514,9 @@ impl OpenSsh {
             return Err(AppError::new(
                 ErrorCode::InvalidArguments,
                 "an SSH remote command is required",
+            )
+            .with_hint(
+                "Place the remote command after `--`, for example `hb ssh run --environment-id ENV_ID -- uptime`.",
             ));
         }
         if remote_command
@@ -510,6 +527,9 @@ impl OpenSsh {
             return Err(AppError::new(
                 ErrorCode::InvalidArguments,
                 "the SSH remote command name cannot be empty",
+            )
+            .with_hint(
+                "Pass a non-empty command after `--`; run `hb ssh run --help` for examples.",
             ));
         }
         if target.working_directory().is_some() {
@@ -578,7 +598,11 @@ impl OpenSsh {
         // here would make terminal reads (host-key, password, or sudo prompts) stop with SIGTTIN.
         let mut child = ManagedChild::new(child);
         let outcome = wait_for_inherited_child(&mut child, options.timeout, &options.cancellation)
-            .map_err(|error| AppError::io("failed while waiting for the SSH client", &error))?;
+            .map_err(|error| {
+                AppError::io("failed while waiting for the SSH client", &error).with_hint(
+                    "Check local process limits, run `hb doctor`, and retry the exact environment.",
+                )
+            })?;
         if matches!(outcome, ProcessOutcome::Exited(_)) {
             child.release();
         }
@@ -596,13 +620,17 @@ impl OpenSsh {
             return Err(AppError::new(
                 ErrorCode::InvalidInput,
                 "at least one SSH target is required",
+            )
+            .with_hint(
+                "Select at least one target with `--environment-id` or another documented selector.",
             ));
         }
         if options.jobs == 0 {
             return Err(AppError::new(
                 ErrorCode::InvalidArguments,
                 "SSH concurrency must be greater than zero",
-            ));
+            )
+            .with_hint("Use a `--jobs` value from 1 through 64."));
         }
         if remote_command.is_empty()
             || remote_command
@@ -613,6 +641,9 @@ impl OpenSsh {
             return Err(AppError::new(
                 ErrorCode::InvalidArguments,
                 "an SSH remote command is required",
+            )
+            .with_hint(
+                "Place the remote command after `--`, for example `hb ssh run --environment-id ENV_ID -- uptime`.",
             ));
         }
 
@@ -853,7 +884,9 @@ fn map_spawn_error(error: io::Error) -> AppError {
         )
         .with_hint("Install OpenSSH and ensure `ssh` is available on PATH.")
     } else {
-        AppError::io("could not start the local SSH client", &error)
+        AppError::io("could not start the local SSH client", &error).with_hint(
+            "Check that OpenSSH is executable and local process creation is permitted, then run `hb doctor`.",
+        )
     }
 }
 
@@ -1457,6 +1490,14 @@ mod tests {
         }
     }
 
+    fn unavailable_error() -> AppError {
+        AppError::new(
+            ErrorCode::Unavailable,
+            "SSH is disabled for this provider environment",
+        )
+        .with_hint("Enable SSH in the provider dashboard before connecting.")
+    }
+
     #[test]
     fn captured_arguments_are_separate_and_preserve_host_key_policy() {
         let transport = OpenSsh::without_pooling("ssh");
@@ -1574,11 +1615,14 @@ mod tests {
 
     #[test]
     fn preflight_results_use_safe_failures_and_the_effective_capture_limit() {
-        let unavailable = TargetExecution::target_unavailable(environment(0));
+        let unavailable_error = unavailable_error();
+        let unavailable = TargetExecution::target_unavailable(environment(0), &unavailable_error);
         let skipped = TargetExecution::fail_fast_skipped(environment(1));
         let report = BatchReport::from_results(
             (0..33)
-                .map(|index| TargetExecution::target_unavailable(environment(index)))
+                .map(|index| {
+                    TargetExecution::target_unavailable(environment(index), &unavailable_error)
+                })
                 .collect(),
         );
 
@@ -1586,6 +1630,15 @@ mod tests {
         assert_eq!(
             unavailable.failure.as_ref().map(|failure| failure.code),
             Some(ExecutionFailureCode::TargetUnavailable)
+        );
+        assert_eq!(
+            unavailable
+                .failure
+                .as_ref()
+                .map(|failure| failure.message.as_str()),
+            Some(
+                "SSH is disabled for this provider environment; remediation: Enable SSH in the provider dashboard before connecting."
+            )
         );
         assert_eq!(skipped.state, ExecutionState::Skipped);
         assert_eq!(

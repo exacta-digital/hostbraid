@@ -22,7 +22,10 @@ impl SecretToken {
             value.zeroize();
             return Err(AppError::new(
                 ErrorCode::InvalidInput,
-                "credential token is empty or malformed",
+                "credential token must be one non-empty line with no control characters",
+            )
+            .with_hint(
+                "Enter the token at the hidden prompt, or pipe exactly one UTF-8 token with `--token-stdin`; tokens are never accepted as command arguments.",
             ));
         }
         Ok(Self(value))
@@ -62,6 +65,9 @@ impl TokenInput for TerminalTokenInput {
             AppError::io(
                 "failed to read a hidden credential from the terminal",
                 &error,
+            )
+            .with_hint(
+                "Run the command in an interactive terminal, or use `--token-stdin` or `--credential-env <NAME>`.",
             )
         })?;
         SecretToken::new(token)
@@ -119,8 +125,9 @@ pub(crate) fn collect_credential(
     match (token_stdin, credential_env) {
         (true, Some(_)) => Err(AppError::new(
             ErrorCode::InvalidArguments,
-            "choose either token stdin or an environment credential source",
-        )),
+            "choose exactly one credential source",
+        )
+        .with_hint("Use either `--token-stdin` or `--credential-env <NAME>`, not both.")),
         (true, None) => Ok(CredentialCandidate::new(
             CredentialSource::Keyring,
             input.read_stdin()?,
@@ -141,7 +148,9 @@ pub(crate) fn collect_credential(
             ErrorCode::InvalidInput,
             "a credential source is required in non-interactive mode",
         )
-        .with_hint("Use --token-stdin or --credential-env <NAME>.")),
+        .with_hint(
+            "Pipe a token with `--token-stdin`, or name an existing variable with `--credential-env <NAME>`.",
+        )),
     }
 }
 
@@ -161,7 +170,9 @@ impl CredentialKeyring for OsCredentialKeyring {
                 ErrorCode::Unavailable,
                 "the OS credential store could not save the profile credential",
             )
-            .with_hint("Unlock or configure the OS credential store, then retry.")
+            .with_hint(
+                "Unlock or configure the OS credential store, or use `--credential-env <NAME>` instead.",
+            )
         })
     }
 
@@ -174,7 +185,10 @@ impl CredentialKeyring for OsCredentialKeyring {
                 ErrorCode::Unavailable,
                 "the OS credential store could not read the profile credential",
             )
-            .with_hint("Unlock or configure the OS credential store, then retry.")),
+            .with_hint(format!(
+                "Unlock the OS credential store; if the entry was removed, run `hb profile credential set {}`.",
+                format_profile_ref(profile)
+            ))),
         }
     }
 
@@ -186,7 +200,10 @@ impl CredentialKeyring for OsCredentialKeyring {
                 ErrorCode::Unavailable,
                 "the OS credential store could not remove the profile credential",
             )
-            .with_hint("Unlock or configure the OS credential store, then retry.")),
+            .with_hint(format!(
+                "Unlock the OS credential store and remove the HostBraid entry for {} manually if cleanup continues to fail.",
+                format_profile_ref(profile)
+            ))),
         }
     }
 }
@@ -203,7 +220,7 @@ pub(crate) fn resolve_credential(
                 "the profile credential is missing from the OS credential store",
             )
             .with_hint(format!(
-                "Run `hostbraid profile credential set {}`.",
+                "Run `hb profile credential set {}` and enter the replacement token securely.",
                 format_profile_ref(&profile.reference())
             ))
         }),
@@ -221,7 +238,7 @@ fn token_from_environment(
             "the configured credential environment variable is not set",
         )
         .with_hint(format!(
-            "Set `{variable}` in the current process environment."
+            "Set `{variable}` in the current process environment, or change the profile credential source."
         ))
     })?;
     let value = value.into_string().map_err(|_| {
@@ -229,11 +246,15 @@ fn token_from_environment(
             ErrorCode::AuthenticationFailed,
             "the configured credential environment variable is not valid UTF-8",
         )
+        .with_hint("Set the variable to one valid UTF-8 token, then retry.")
     })?;
     SecretToken::new(value).map_err(|_| {
         AppError::new(
             ErrorCode::AuthenticationFailed,
             "the configured credential environment variable is empty or malformed",
+        )
+        .with_hint(
+            "Set the variable to one non-empty token without control characters or embedded newlines.",
         )
     })
 }
@@ -245,13 +266,17 @@ fn read_bounded_token(reader: impl Read) -> Result<SecretToken> {
     reader
         .take(MAX_TOKEN_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| AppError::io("failed to read a credential from stdin", &error))?;
+        .map_err(|error| {
+            AppError::io("failed to read a credential from stdin", &error)
+                .with_hint("Pipe exactly one token followed by EOF, then retry.")
+        })?;
     if bytes.len() > MAX_TOKEN_BYTES as usize {
         bytes.zeroize();
-        return Err(AppError::new(
-            ErrorCode::InvalidInput,
-            "credential token is too long",
-        ));
+        return Err(
+            AppError::new(ErrorCode::InvalidInput, "credential token is too long").with_hint(
+                "Provide the API token only; do not pipe JSON, headers, or command output.",
+            ),
+        );
     }
 
     let mut value = match String::from_utf8(std::mem::take(&mut *bytes)) {
@@ -262,7 +287,8 @@ fn read_bounded_token(reader: impl Read) -> Result<SecretToken> {
             return Err(AppError::new(
                 ErrorCode::InvalidInput,
                 "credential token from stdin is not valid UTF-8",
-            ));
+            )
+            .with_hint("Pipe the token as UTF-8 text."));
         }
     };
     if value.ends_with('\n') {
@@ -284,7 +310,9 @@ fn keyring_entry(profile: &ProviderProfileRef) -> Result<keyring::Entry> {
             ErrorCode::Unavailable,
             "the OS credential store is unavailable",
         )
-        .with_hint("Configure a supported desktop credential store, then retry.")
+        .with_hint(
+            "Configure a supported desktop credential store, or use `--credential-env <NAME>` instead.",
+        )
     })
 }
 
@@ -373,6 +401,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_tokens_explain_safe_input_without_echoing_the_value() {
+        for secret_canary in [
+            "secret-token-canary-never-render\n",
+            "secret-token-canary\tnever-render",
+        ] {
+            let error = SecretToken::new(secret_canary.to_owned()).expect_err("token is malformed");
+
+            assert_eq!(
+                error.message(),
+                "credential token must be one non-empty line with no control characters"
+            );
+            assert!(
+                error
+                    .hint()
+                    .is_some_and(|hint| hint.contains("--token-stdin"))
+            );
+            assert!(!error.message().contains(secret_canary));
+            assert!(
+                !error
+                    .hint()
+                    .is_some_and(|hint| hint.contains(secret_canary))
+            );
+        }
+    }
+
+    #[test]
     fn stdin_read_errors_after_partial_input_are_secret_safe() {
         struct PartialErrorReader(bool);
 
@@ -391,6 +445,7 @@ mod tests {
         let error = read_bounded_token(PartialErrorReader(false)).expect_err("read must fail");
 
         assert_eq!(error.code(), ErrorCode::Io);
+        assert!(error.hint().is_some_and(|hint| hint.contains("EOF")));
         assert!(!error.to_string().contains("partial-secret-canary"));
         assert!(!format!("{error:?}").contains("partial-secret-canary"));
     }
@@ -401,6 +456,21 @@ mod tests {
         let error = collect_credential(false, None, false, &FakeInput, &environment)
             .expect_err("source is required");
         assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("--credential-env <NAME>"))
+        );
+
+        let conflict =
+            collect_credential(true, Some("KINSTA_TOKEN"), false, &FakeInput, &environment)
+                .expect_err("sources conflict");
+        assert_eq!(conflict.code(), ErrorCode::InvalidArguments);
+        assert!(
+            conflict
+                .hint()
+                .is_some_and(|hint| hint.contains("not both"))
+        );
 
         let candidate = collect_credential(true, None, false, &FakeInput, &environment)
             .expect("stdin credential");
@@ -442,6 +512,25 @@ mod tests {
         let error = resolve_credential(&missing, &keyring, &FakeEnvironment::default())
             .expect_err("environment is missing");
         assert_eq!(error.code(), ErrorCode::AuthenticationFailed);
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("KINSTA_TOKEN"))
+        );
+
+        let missing = profile(CredentialSource::Keyring);
+        let error = resolve_credential(
+            &missing,
+            &FakeKeyring::default(),
+            &FakeEnvironment::default(),
+        )
+        .expect_err("keyring entry is missing");
+        assert_eq!(error.code(), ErrorCode::AuthenticationFailed);
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("hb profile credential set kinsta:agency"))
+        );
     }
 
     #[test]

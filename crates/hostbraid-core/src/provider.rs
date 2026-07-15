@@ -64,7 +64,15 @@ impl CatalogSnapshot {
             .iter()
             .find(|site| site.site.reference == *reference)
             .map(|site| site.environments.clone())
-            .ok_or_else(|| AppError::new(ErrorCode::NotFound, "site was not found"))
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::NotFound,
+                    "the selected site is not present in the current provider catalog",
+                )
+                .with_hint(
+                    "Refresh the site list and retry with the exact canonical site reference",
+                )
+            })
     }
 }
 
@@ -346,7 +354,8 @@ pub trait ArtifactCatalog: ProviderIdentity {
 
 #[cfg(test)]
 mod tests {
-    use super::{Capability, SshTarget};
+    use super::{Capability, CatalogSnapshot, SshTarget};
+    use crate::{ErrorCode, ProviderProfileRef, SiteRef};
 
     #[test]
     fn capability_distinguishes_support_from_availability() {
@@ -360,6 +369,32 @@ mod tests {
         assert!(disabled.supported);
         assert!(!disabled.available);
         assert_eq!(disabled.reason.as_deref(), Some("ssh_disabled"));
+    }
+
+    #[test]
+    fn missing_catalog_site_has_provider_neutral_remediation() {
+        let profile =
+            ProviderProfileRef::try_new("example-host", "agency").expect("valid profile reference");
+        let missing = SiteRef::try_new("example-host", "agency", "site_missing")
+            .expect("valid site reference");
+        let snapshot = CatalogSnapshot {
+            profile,
+            sites: Vec::new(),
+        };
+
+        let error = snapshot
+            .environments_for(&missing)
+            .expect_err("the site is absent from the catalog");
+
+        assert_eq!(error.code(), ErrorCode::NotFound);
+        assert_eq!(
+            error.message(),
+            "the selected site is not present in the current provider catalog"
+        );
+        assert_eq!(
+            error.hint(),
+            Some("Refresh the site list and retry with the exact canonical site reference")
+        );
     }
 
     #[test]

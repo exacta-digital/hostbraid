@@ -5,7 +5,8 @@ defaults:
   overrides automatic detection.
 - Progress is transient, goes to stderr, and disappears in pipes or JSON mode.
 - Commands explain their arguments through contextual `--help`.
-- Parse failures omit unrecognized argument values so accidentally pasted secrets are not echoed.
+- Errors explain what failed and offer a concrete next action. Parse failures name only recognized
+  command structure and omit unrecognized values so accidentally pasted secrets are not echoed.
 - `hostbraid search <word>` searches commands and the full guide text.
 - `hostbraid completion <shell>` integrates discovery into your shell.
 
