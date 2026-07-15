@@ -9,10 +9,10 @@ sessions; retrieve portable artifacts; and orchestrate explicit files-and-databa
 It is built in Rust, designed for humans and automation, and developed as an open-source project by
 [It's Ed](https://itsed.se).
 
-> **Project status:** foundational walking skeleton. The CLI contract, provider-neutral core,
-> guides, search, diagnostics, and completions work today. No provider credentials or production
-> API calls are accepted yet. Kinsta is the first integration target; EdHosting is the second
-> adapter used to prove the abstraction.
+> **Project status:** first Kinsta vertical slice. The current development build can configure
+> secure Kinsta profiles, discover sites and environments, delegate interactive and one-shot work
+> to OpenSSH, and inspect Kinsta's read-only plugin/theme inventory. Export and pull workflows are
+> still validation work; EdHosting remains the second adapter used to prove the abstraction.
 
 ## Why HostBraid?
 
@@ -29,7 +29,7 @@ HostBraid delegates rather than replaces:
 - File transfer prefers existing provider exports, then rsync/SFTP/tar strategies.
 - Local development remains the job of tools such as DDEV.
 
-## Try the walking skeleton
+## Try HostBraid
 
 Rust 1.85 or newer is required.
 
@@ -59,20 +59,76 @@ handoff suite.
 ## Current commands
 
 ```text
-hostbraid                              Show a friendly starting point
+hostbraid profile add|list|show        Manage secret-free provider profiles
+hostbraid profile default|remove       Select or remove an exact profile
+hostbraid profile credential set       Replace and validate a credential source
+hostbraid site list                    List sites for a provider profile
+hostbraid environment list|show        List or inspect exact environments
+hostbraid ssh open|run                 Open a shell or run one remote command
+hostbraid inventory plugins|themes     Inspect read-only WordPress inventory
 hostbraid guide [topic]                Read a built-in workflow guide
-hostbraid guide --list                 List every guide
 hostbraid search <query>               Search commands and guides
-hostbraid doctor                       Check SSH, transfer, and WP-CLI tools
+hostbraid doctor                       Check local workflow dependencies
 hostbraid completion <shell>           Generate shell completion code
 ```
 
 `doctor` is a report: unavailable tools appear as booleans and warnings but do not make the command
 itself fail when the report was produced successfully.
 
-Clap provides contextual `--help`, typo suggestions, aliases, environment-backed global options,
-and shell completions. Automatic human output uses color and transient progress only on terminals;
-an explicit `--color always` overrides color detection. JSON mode never emits a spinner or prompt.
+Clap provides contextual `--help`, aliases, environment-backed global options, and shell
+completions. Parse failures deliberately do not echo unrecognized values, because an accidentally
+pasted credential must not reappear in diagnostics. Automatic human output uses color and transient
+progress only on terminals; an explicit `--color always` overrides color detection. JSON mode never
+emits a spinner or prompt.
+
+## Kinsta quick start
+
+Add a profile interactively to save its validated token in the operating-system credential store:
+
+```bash
+hostbraid profile add kinsta agency --default
+hostbraid site list
+hostbraid environment list --site-id SITE_ID
+hostbraid environment show --environment-id ENVIRONMENT_ID
+```
+
+For CI, name the environment variable that HostBraid should resolve on each use. The token itself is
+never passed in argv or written to the profile configuration:
+
+```bash
+hostbraid profile add kinsta ci --credential-env KINSTA_TOKEN
+hostbraid site list --profile kinsta:ci
+```
+
+Open one exact environment or run one command on it:
+
+```bash
+hostbraid ssh open --environment-id ENVIRONMENT_ID
+hostbraid ssh run --environment-id ENVIRONMENT_ID -- uptime
+```
+
+Selectors based on a site, kind, label, or `--all` can expand to several environments. HostBraid
+previews these broad selections and requires confirmation; pass `--yes` only after reviewing the
+scope. Repeated values within one selector category are ORed, while different categories are ANDed:
+
+```bash
+hostbraid ssh run --kind production --label customer-a --yes -- wp core version
+hostbraid ssh run --site-id SITE_ID --jobs 4 --timeout 2m --yes -- uptime
+```
+
+Batch execution collects an ordered result for every target by default. `--jobs` bounds both SSH
+coordinate loading and simultaneous OpenSSH children; `--fail-fast` stops queued remote work after
+an unsuccessful target. A target whose SSH access is unavailable does not prevent other selected
+targets from running unless fail-fast was requested. Ctrl-C cancels queued work and kills and reaps
+the captured SSH process groups. HostBraid asks OpenSSH to reuse connections for 60 seconds when a
+secure local control-socket directory is available; `--no-pool` disables this.
+
+Kinsta's company-wide WordPress inventory is read-only:
+
+```bash
+hostbraid inventory plugins --updates --details
+hostbraid inventory themes --vulnerable --search twenty
+```
 
 ## Agent-friendly by contract
 
@@ -86,24 +142,25 @@ hostbraid --output json --no-input <command>
 - stderr is reserved for diagnostics and progress.
 - `--output json` implies non-interactive behavior.
 - Error codes and process exit statuses are stable.
-- Ambiguous resource names will fail rather than guessing.
+- Ambiguous or missing exact selectors fail rather than guessing.
 - Exact provider IDs—not domains or display names—are authoritative.
 - Secrets, signed download URLs, and raw provider responses are excluded from ordinary output.
+- Captured SSH failures return `ok: false`, `remote_execution_failed`, and structured `data` for
+  the per-target results that completed or were skipped.
 
 Run `hostbraid guide agents` for the embedded operating instructions. The JSON contract is
 documented in [docs/design/0002-cli-contract.md](docs/design/0002-cli-contract.md).
 
-## Planned first vertical slice
+## First vertical slice
 
-The first provider-backed milestone is intentionally narrow:
+The implemented Kinsta slice is intentionally narrow: secure profiles, site/environment catalog,
+environment capability inspection, structured SSH target discovery, OpenSSH shell and one-shot
+execution, bounded fan-out, and read-only company plugin/theme inventory. It uses documented Kinsta
+API endpoints and never automates the hosting dashboard.
 
-1. Configure a Kinsta profile without placing its token in argv or TOML.
-2. List sites and environments in human or JSON form.
-3. Inspect exact environment metadata and capabilities.
-4. Open SSH through the user's existing OpenSSH configuration and keys.
-5. List/download an existing portable export.
-6. Prove a safe, browser-free files-and-database pull.
-7. Exercise the same contract against EdHosting before freezing the abstraction.
+Existing portable exports and a safe browser-free files-and-database pull remain separate future
+work. The same useful capabilities must then be exercised against EdHosting before the shared
+provider abstraction is treated as proven.
 
 See [docs/roadmap.md](docs/roadmap.md) and
 [docs/validation-spikes.md](docs/validation-spikes.md).
@@ -114,7 +171,7 @@ See [docs/roadmap.md](docs/roadmap.md) and
 Clap CLI
    │
 application workflows + policy
-   ├── provider capabilities: catalog / SSH access / artifacts
+   ├── provider capabilities: catalog / SSH access / WordPress inventory / artifacts
    ├── Kinsta adapter
    ├── EdHosting adapter
    └── transport: OpenSSH / rsync / SFTP / tar

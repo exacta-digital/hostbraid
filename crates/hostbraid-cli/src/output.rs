@@ -1,6 +1,8 @@
 use crate::VERSION;
 use crate::context::Context;
-use hostbraid_core::{AppError, MachineFailure, MachineSuccess, MachineWarning, Result};
+use hostbraid_core::{
+    AppError, MachineFailure, MachinePartialFailure, MachineSuccess, MachineWarning, Result,
+};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -18,11 +20,25 @@ pub(crate) fn write_machine_error(command: &str, error: &AppError) -> Result<()>
     write_json(&envelope)
 }
 
+pub(crate) fn write_machine_partial_failure<T: Serialize>(
+    command: &str,
+    error: &AppError,
+    data: &T,
+    warnings: Vec<MachineWarning>,
+) -> Result<()> {
+    let envelope = MachinePartialFailure::new(command, error.clone(), data, warnings, VERSION);
+    write_json(&envelope)
+}
+
 pub(crate) fn write_error(context: &Context, command: &str, error: &AppError) -> Result<()> {
     if context.output.is_machine() {
         return write_machine_error(command, error);
     }
 
+    write_human_error(error)
+}
+
+pub(crate) fn write_human_error(error: &AppError) -> Result<()> {
     let mut stderr = io::stderr().lock();
     writeln!(
         stderr,
@@ -46,6 +62,14 @@ pub(crate) fn write_human(contents: &str) -> Result<()> {
         .write_all(contents.as_bytes())
         .and_then(|()| stdout.flush())
         .map_err(|error| AppError::io("failed to write output", &error))
+}
+
+pub(crate) fn write_human_stderr(contents: &str) -> Result<()> {
+    let mut stderr = io::stderr().lock();
+    stderr
+        .write_all(contents.as_bytes())
+        .and_then(|()| stderr.flush())
+        .map_err(|error| AppError::io("failed to write diagnostic output", &error))
 }
 
 fn write_json<T: Serialize>(value: &T) -> Result<()> {

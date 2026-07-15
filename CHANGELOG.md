@@ -13,3 +13,10 @@ intends to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Built-in guides, command search, environment doctor, and shell completions.
 - Versioned JSON success and error envelopes.
 - Provider-neutral domain and capability contracts.
+- Secure Kinsta profiles using the OS credential store or named environment references, with
+  hidden-prompt and bounded-stdin token input.
+- Kinsta site/environment discovery, capability inspection, and read-only plugin/theme inventory.
+- Interactive and one-shot OpenSSH workflows with selector confirmation, bounded fan-out, graceful
+  batch signal cancellation, optional timeout/fail-fast controls, and best-effort 60-second
+  connection reuse.
+- Structured partial-failure JSON for captured SSH results.

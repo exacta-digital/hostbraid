@@ -19,6 +19,14 @@ pub struct SiteSummary {
     pub reference: SiteRef,
     pub display_name: String,
     pub primary_domain: Option<String>,
+    pub labels: Vec<SiteLabel>,
+}
+
+/// Provider-defined label attached to a site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteLabel {
+    pub id: crate::OpaqueId,
+    pub name: String,
 }
 
 /// Minimal environment information returned by inventory operations.
@@ -29,6 +37,80 @@ pub struct EnvironmentSummary {
     pub kind: EnvironmentKind,
     pub provider_kind: Option<String>,
     pub primary_domain: Option<String>,
+}
+
+/// One site and all of its environments from the same catalog read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSite {
+    pub site: SiteSummary,
+    pub environments: Vec<EnvironmentSummary>,
+}
+
+/// A coherent provider catalog used to resolve sites and environments without per-item races.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogSnapshot {
+    pub profile: ProviderProfileRef,
+    pub sites: Vec<CatalogSite>,
+}
+
+impl CatalogSnapshot {
+    #[must_use]
+    pub fn site_summaries(&self) -> Vec<SiteSummary> {
+        self.sites.iter().map(|site| site.site.clone()).collect()
+    }
+
+    pub fn environments_for(&self, reference: &SiteRef) -> Result<Vec<EnvironmentSummary>> {
+        self.sites
+            .iter()
+            .find(|site| site.site.reference == *reference)
+            .map(|site| site.environments.clone())
+            .ok_or_else(|| AppError::new(ErrorCode::NotFound, "site was not found"))
+    }
+}
+
+/// WordPress extension category represented by an inventory response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WordPressComponentKind {
+    Plugin,
+    Theme,
+}
+
+/// One environment where a WordPress plugin or theme is installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordPressComponentInstallation {
+    pub environment: EnvironmentRef,
+    pub status: String,
+    pub installed_version: String,
+    pub installed_version_vulnerable: bool,
+    pub update_state: Option<String>,
+    pub available_version: Option<String>,
+    pub available_version_vulnerable: bool,
+    pub update_status: Option<String>,
+    pub auto_update_type: Option<String>,
+}
+
+/// Company-wide WordPress plugin or theme metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordPressComponent {
+    pub slug: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub latest_version: Option<String>,
+    pub latest_version_vulnerable: bool,
+    pub environment_count: u64,
+    pub update_count: u64,
+    pub installations: Vec<WordPressComponentInstallation>,
+}
+
+/// A complete company inventory assembled from every provider page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordPressComponentInventory {
+    pub kind: WordPressComponentKind,
+    pub total: u64,
+    pub refreshed_at: Option<String>,
+    pub components: Vec<WordPressComponent>,
 }
 
 /// Support and current availability of one versioned provider capability.
@@ -217,9 +299,31 @@ pub trait ProviderIdentity: Send + Sync {
 /// Read-only provider inventory.
 #[async_trait]
 pub trait Catalog: ProviderIdentity {
-    async fn list_sites(&self, profile: &ProviderProfileRef) -> Result<Vec<SiteSummary>>;
+    async fn catalog_snapshot(&self, profile: &ProviderProfileRef) -> Result<CatalogSnapshot>;
 
-    async fn list_environments(&self, site: &SiteRef) -> Result<Vec<EnvironmentSummary>>;
+    async fn list_sites(&self, profile: &ProviderProfileRef) -> Result<Vec<SiteSummary>> {
+        Ok(self.catalog_snapshot(profile).await?.site_summaries())
+    }
+
+    async fn list_environments(&self, site: &SiteRef) -> Result<Vec<EnvironmentSummary>> {
+        self.catalog_snapshot(&site.profile_ref())
+            .await?
+            .environments_for(site)
+    }
+}
+
+/// Read-only company inventory for WordPress plugins and themes.
+#[async_trait]
+pub trait WordPressInventory: ProviderIdentity {
+    async fn plugin_inventory(
+        &self,
+        profile: &ProviderProfileRef,
+    ) -> Result<WordPressComponentInventory>;
+
+    async fn theme_inventory(
+        &self,
+        profile: &ProviderProfileRef,
+    ) -> Result<WordPressComponentInventory>;
 }
 
 /// Environment capability discovery.

@@ -9,14 +9,22 @@ mod model;
 mod provider;
 
 pub use error::{AppError, ErrorCode, Result};
-pub use machine::{MachineFailure, MachineMeta, MachineSuccess, MachineWarning};
+pub use machine::{
+    MachineEnvironmentListData, MachineEnvironmentShowData, MachineFailure, MachineInventoryData,
+    MachineMeta, MachinePartialFailure, MachineSshCaptureEncoding, MachineSshCapturedStream,
+    MachineSshExecutionState, MachineSshFailure, MachineSshFailureCode, MachineSshRunData,
+    MachineSshTargetResult, MachineSuccess, MachineWarning,
+};
 pub use model::{
     ActionClass, ArtifactRef, EnvironmentKind, EnvironmentRef, OpaqueId, ProfileName, ProviderId,
     ProviderProfileRef, SiteRef,
 };
 pub use provider::{
     ArtifactCatalog, ArtifactKind, ArtifactSummary, Capability, CapabilitySource, Catalog,
-    EnvironmentSummary, ProviderDescriptor, ProviderIdentity, SiteSummary, SshAccess, SshTarget,
+    CatalogSite, CatalogSnapshot, EnvironmentSummary, ProviderDescriptor, ProviderIdentity,
+    SiteLabel, SiteSummary, SshAccess, SshTarget, WordPressComponent,
+    WordPressComponentInstallation, WordPressComponentInventory, WordPressComponentKind,
+    WordPressInventory,
 };
 
 /// Version of HostBraid's public JSON envelope.

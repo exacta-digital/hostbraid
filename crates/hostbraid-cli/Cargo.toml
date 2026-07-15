@@ -20,12 +20,25 @@ path = "src/bin/hb.rs"
 [dependencies]
 clap.workspace = true
 clap_complete.workspace = true
+command-group.workspace = true
 console.workspace = true
+fs2.workspace = true
+futures-util.workspace = true
 hostbraid-core = { path = "../hostbraid-core" }
+hostbraid-provider-kinsta = { path = "../hostbraid-provider-kinsta" }
+humantime.workspace = true
 indicatif.workspace = true
+keyring.workspace = true
+rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+signal-hook.workspace = true
 strsim.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [lints]
 workspace = true

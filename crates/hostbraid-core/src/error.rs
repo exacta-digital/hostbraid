@@ -20,6 +20,7 @@ pub enum ErrorCode {
     ProviderUnavailable,
     DependencyMissing,
     PolicyDenied,
+    RemoteExecutionFailed,
     Io,
     Internal,
 }
@@ -34,7 +35,11 @@ impl ErrorCode {
             Self::AuthenticationFailed => 4,
             Self::ProviderUnavailable | Self::Unavailable => 5,
             Self::PolicyDenied => 6,
-            Self::NotFound | Self::Unsupported | Self::Io | Self::Internal => 1,
+            Self::NotFound
+            | Self::Unsupported
+            | Self::RemoteExecutionFailed
+            | Self::Io
+            | Self::Internal => 1,
         }
     }
 }
@@ -52,6 +57,7 @@ impl fmt::Display for ErrorCode {
             Self::ProviderUnavailable => "provider_unavailable",
             Self::DependencyMissing => "dependency_missing",
             Self::PolicyDenied => "policy_denied",
+            Self::RemoteExecutionFailed => "remote_execution_failed",
             Self::Io => "io",
             Self::Internal => "internal",
         };
@@ -123,5 +129,10 @@ mod tests {
         assert_eq!(ErrorCode::AmbiguousTarget.to_string(), "ambiguous_target");
         assert_eq!(ErrorCode::AmbiguousTarget.exit_code(), 2);
         assert_eq!(ErrorCode::AuthenticationFailed.exit_code(), 4);
+        assert_eq!(
+            ErrorCode::RemoteExecutionFailed.to_string(),
+            "remote_execution_failed"
+        );
+        assert_eq!(ErrorCode::RemoteExecutionFailed.exit_code(), 1);
     }
 }

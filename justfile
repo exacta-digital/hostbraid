@@ -22,6 +22,10 @@ lint:
 test:
     cargo test --workspace --all-targets --all-features
 
+# Run read-only validation against an explicitly supplied restricted Kinsta test account.
+test-kinsta-live:
+    cargo test -p hostbraid-provider-kinsta --test live -- --ignored
+
 # Run the CLI. Pass arguments after `--`, for example: just run -- guide agents
 run *args:
     cargo run -- {{args}}

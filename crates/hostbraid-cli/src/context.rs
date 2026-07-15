@@ -1,6 +1,7 @@
 use crate::cli::{Cli, ColorChoice, OutputFormat};
+use hostbraid_core::{AppError, ErrorCode, Result};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::io::{IsTerminal, stderr, stdout};
+use std::io::{self, IsTerminal, Write, stderr, stdin, stdout};
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -15,7 +16,7 @@ impl Context {
     pub fn new(cli: &Cli) -> Self {
         Self {
             output: cli.output,
-            interactive: !cli.no_input && !cli.output.is_machine(),
+            interactive: !cli.no_input && !cli.output.is_machine() && stdin().is_terminal(),
             quiet: cli.quiet,
             color: cli.color,
         }
@@ -52,5 +53,28 @@ impl Context {
         spinner.set_message(message.into());
         spinner.enable_steady_tick(Duration::from_millis(80));
         spinner
+    }
+
+    pub fn confirm(&self, prompt: &str) -> Result<bool> {
+        if !self.interactive {
+            return Err(AppError::new(
+                ErrorCode::PolicyDenied,
+                "the operation requires explicit non-interactive confirmation",
+            )
+            .with_hint("Review the selected targets, then rerun with `--yes`."));
+        }
+
+        let mut stderr = io::stderr().lock();
+        write!(stderr, "{prompt} [y/N] ")
+            .and_then(|()| stderr.flush())
+            .map_err(|error| AppError::io("failed to write confirmation prompt", &error))?;
+        let mut answer = String::new();
+        io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| AppError::io("failed to read confirmation", &error))?;
+        Ok(matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        ))
     }
 }
