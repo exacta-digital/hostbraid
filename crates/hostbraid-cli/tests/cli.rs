@@ -46,6 +46,31 @@ fn run_with_config(arguments: &[&str], config_home: &TestConfigHome) -> Output {
         .expect("HostBraid binary runs")
 }
 
+fn write_environment_profile(config_home: &TestConfigHome, is_default: bool) {
+    std::fs::create_dir_all(config_home.path()).expect("create test config home");
+    let default_profile = if is_default {
+        r#"{"provider": "kinsta", "profile": "agency"}"#
+    } else {
+        "null"
+    };
+    std::fs::write(
+        config_home.path().join("profiles.json"),
+        format!(
+            r#"{{
+  "schema_version": 1,
+  "default_profile": {default_profile},
+  "profiles": [{{
+    "provider": "kinsta",
+    "name": "agency",
+    "company_id": "company-1",
+    "credential_source": {{"type": "environment", "variable": "UNSET_TEST_TOKEN"}}
+  }}]
+}}"#
+        ),
+    )
+    .expect("write secret-free profile configuration");
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("stdout is UTF-8")
 }
@@ -85,6 +110,77 @@ fn hb_is_an_alias_for_the_hostbraid_binary() {
     let value = json(&output);
     assert_eq!(value["command"], "cli.version");
     assert_eq!(value["data"]["kind"], "version");
+}
+
+#[test]
+fn profile_facade_is_visible_in_help_and_search() {
+    let commands = ["login", "profiles", "use", "logout"];
+    let root_help = run_binary(env!("CARGO_BIN_EXE_hb"), &["--help"]);
+
+    assert!(root_help.status.success());
+    let root_help = stdout(&root_help);
+    for command in commands {
+        assert!(
+            root_help
+                .lines()
+                .any(|line| line.trim_start().starts_with(&format!("{command} "))),
+            "root help omitted `{command}`"
+        );
+
+        let help = run_binary(env!("CARGO_BIN_EXE_hb"), &[command, "--help"]);
+        assert!(help.status.success(), "`hb {command} --help` failed");
+        assert!(
+            stdout(&help).contains(&format!("Usage: hb {command}")),
+            "help for `{command}` did not use its public command name"
+        );
+
+        let search = run_binary(
+            env!("CARGO_BIN_EXE_hb"),
+            &["search", command, "--output=json"],
+        );
+        assert!(search.status.success(), "search for `{command}` failed");
+        let value = json(&search);
+        assert!(
+            value["data"].as_array().is_some_and(|results| {
+                results
+                    .iter()
+                    .any(|result| result["name"] == format!("hostbraid {command}"))
+            }),
+            "search omitted `{command}`"
+        );
+    }
+
+    let long_help = run(&["login", "--help"]);
+    assert!(long_help.status.success());
+    assert!(stdout(&long_help).contains("Usage: hostbraid login"));
+}
+
+#[test]
+fn profile_facade_help_describes_its_safe_arguments() {
+    let cases = [
+        (
+            "login",
+            &["<PROVIDER>", "<NAME>", "--token-stdin", "--credential-env"][..],
+        ),
+        ("profiles", &[][..]),
+        ("use", &["<PROFILE>"][..]),
+        ("logout", &["<PROFILE>", "--yes"][..]),
+    ];
+
+    for (command, expected) in cases {
+        let output = run_binary(env!("CARGO_BIN_EXE_hb"), &[command, "--help"]);
+        assert!(output.status.success(), "`hb {command} --help` failed");
+        let help = stdout(&output);
+        for fragment in expected {
+            assert!(
+                help.contains(fragment),
+                "help for `{command}` omitted `{fragment}`"
+            );
+        }
+    }
+
+    let login = run_binary(env!("CARGO_BIN_EXE_hb"), &["login", "--help"]);
+    assert!(!stdout(&login).contains("--default"));
 }
 
 #[test]
@@ -274,6 +370,19 @@ fn human_parse_failures_do_not_echo_accidental_secret_arguments() {
 }
 
 #[test]
+fn login_parse_failures_do_not_echo_accidental_secret_arguments() {
+    let canary = "login-secret-token-canary-never-render";
+    let output = run_binary(
+        env!("CARGO_BIN_EXE_hb"),
+        &["login", "kinsta", "agency", canary],
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!stdout(&output).contains(canary));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(canary));
+}
+
+#[test]
 fn runtime_failures_keep_their_command_identity() {
     let output = run(&["completion", "bash", "--output=json"]);
 
@@ -326,6 +435,77 @@ fn empty_profile_list_has_a_secret_free_machine_shape() {
     assert_eq!(value["command"], "profile.list");
     assert_eq!(value["data"]["default_profile"], Value::Null);
     assert_eq!(value["data"]["profiles"], serde_json::json!([]));
+}
+
+#[test]
+fn login_requires_a_safe_credential_source_before_network_access() {
+    let config_home = TestConfigHome::new();
+    let output = run_with_config(
+        &["login", "kinsta", "agency", "--output=json"],
+        &config_home,
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    let value = json(&output);
+    assert_eq!(value["command"], "profile.add");
+    assert_eq!(value["error"]["code"], "invalid_input");
+    assert_eq!(
+        value["error"]["message"],
+        "a credential source is required in non-interactive mode"
+    );
+}
+
+#[test]
+fn profiles_uses_the_canonical_secret_free_machine_contract() {
+    let config_home = TestConfigHome::new();
+    let output = run_with_config(&["profiles", "--output=json"], &config_home);
+
+    assert!(output.status.success());
+    let value = json(&output);
+    assert_eq!(value["command"], "profile.list");
+    assert_eq!(value["data"]["default_profile"], Value::Null);
+    assert_eq!(value["data"]["profiles"], serde_json::json!([]));
+}
+
+#[test]
+fn use_sets_an_exact_default_without_resolving_its_credential() {
+    let config_home = TestConfigHome::new();
+    write_environment_profile(&config_home, false);
+    let output = run_with_config(&["use", "kinsta:agency", "--output=json"], &config_home);
+
+    assert!(output.status.success());
+    let value = json(&output);
+    assert_eq!(value["command"], "profile.default");
+    assert_eq!(value["data"]["reference"]["provider"], "kinsta");
+    assert_eq!(value["data"]["reference"]["profile"], "agency");
+    assert_eq!(value["data"]["is_default"], true);
+    assert_eq!(
+        value["data"]["credential_source"]["variable"],
+        "UNSET_TEST_TOKEN"
+    );
+}
+
+#[test]
+fn logout_removes_an_exact_profile_without_resolving_its_credential() {
+    let config_home = TestConfigHome::new();
+    write_environment_profile(&config_home, true);
+    let output = run_with_config(
+        &["logout", "kinsta:agency", "--yes", "--output=json"],
+        &config_home,
+    );
+
+    assert!(output.status.success());
+    let value = json(&output);
+    assert_eq!(value["command"], "profile.remove");
+    assert_eq!(value["data"]["profile"]["reference"]["provider"], "kinsta");
+    assert_eq!(value["data"]["profile"]["reference"]["profile"], "agency");
+    assert_eq!(value["data"]["credential_cleanup_failed"], false);
+
+    let profiles = run_with_config(&["profiles", "--output=json"], &config_home);
+    assert!(profiles.status.success());
+    let profiles = json(&profiles);
+    assert_eq!(profiles["data"]["default_profile"], Value::Null);
+    assert_eq!(profiles["data"]["profiles"], serde_json::json!([]));
 }
 
 #[test]

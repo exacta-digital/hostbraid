@@ -65,7 +65,7 @@ impl<'a> ProfileService<'a> {
                     ErrorCode::InvalidInput,
                     "no default provider profile is configured",
                 )
-                .with_hint("Pass --profile provider:name or configure `profile default`.")
+                .with_hint("Pass --profile provider:name or run `hb use provider:name`.")
             })?
         };
         configuration

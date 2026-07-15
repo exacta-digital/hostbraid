@@ -8,7 +8,7 @@ mod text;
 
 use crate::cli::{Cli, Commands};
 use crate::context::Context;
-use clap::{CommandFactory, Parser, error::ErrorKind};
+use clap::{CommandFactory, error::ErrorKind};
 use hostbraid_core::{AppError, ErrorCode};
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -28,7 +28,7 @@ pub fn main_entry() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().collect();
     let machine_requested = cli::machine_output_requested(&arguments);
 
-    let cli = match Cli::try_parse_from(&arguments) {
+    let cli = match cli::try_parse_from(&arguments) {
         Ok(cli) => cli,
         Err(error)
             if matches!(
@@ -94,7 +94,11 @@ pub fn main_entry() -> ExitCode {
     let result = match cli.command {
         None => commands::welcome::run(&context).map(|()| CommandOutcome::Success),
         Some(
-            command @ (Commands::Profile(_)
+            command @ (Commands::Login(_)
+            | Commands::Profiles
+            | Commands::Use(_)
+            | Commands::Logout(_)
+            | Commands::Profile(_)
             | Commands::Site(_)
             | Commands::Environment(_)
             | Commands::Ssh(_)

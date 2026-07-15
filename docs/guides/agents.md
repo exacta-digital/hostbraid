@@ -20,6 +20,13 @@ Provider-backed commands require either an exact `--profile provider:name` or a 
 profile. Non-interactive profile creation and credential rotation require `--token-stdin` or a
 named `--credential-env`; never place a secret token in argv.
 
+The account facade maps to canonical profile operations. `login <provider> <name>` creates and
+selects the new default profile, `profiles` lists profiles, `use <provider:name>` changes the
+default, and `logout <provider:name>` removes an exact local profile. In JSON envelopes their
+command identities remain `profile.add`, `profile.list`, `profile.default`, and `profile.remove`,
+respectively. Non-interactive logout requires `--yes`. Logout does not revoke a provider-side token
+or remove an environment-backed token; perform provider revocation separately when requested.
+
 Resolve catalog IDs before acting:
 
 ```bash

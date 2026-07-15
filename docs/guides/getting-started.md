@@ -17,33 +17,49 @@ hostbraid search export
 hostbraid completion --help
 ```
 
-Configure a Kinsta profile. With a terminal attached, HostBraid reads the token without echoing it,
-validates it with Kinsta, and saves it in the operating-system credential store. The profile file
-contains only secret-free metadata.
+Log in to Kinsta. With a terminal attached, HostBraid reads the token without echoing it, validates
+it with Kinsta, and saves it in the operating-system credential store. The profile file contains
+only secret-free metadata. `login` creates the profile and always selects it as the explicit
+default.
 
 ```bash
-hostbraid profile add kinsta agency --default
-hostbraid profile list
-hostbraid profile show kinsta:agency
+hb login kinsta agency
+hb profiles
 ```
 
 For non-interactive use, either pipe a token through stdin or configure a named environment source.
 Never put the token itself in a command argument.
 
 ```bash
-printf '%s\n' "$KINSTA_TOKEN" | hostbraid profile add kinsta agency-stdin --token-stdin
-hostbraid profile add kinsta ci --credential-env KINSTA_TOKEN
+printf '%s\n' "$KINSTA_TOKEN" | hb login kinsta agency-stdin --token-stdin
+hb login kinsta ci --credential-env KINSTA_TOKEN
 ```
 
-An explicit `--profile provider:name` selects one account. If it is omitted, HostBraid uses only the
-profile selected with `profile default`; it does not guess from the profiles on disk.
+Use an exact `provider:name` reference to change the default. An explicit `--profile provider:name`
+selects one account for a single command. If it is omitted, HostBraid uses only the configured
+default; it does not guess from the profiles on disk.
 
 ```bash
-hostbraid site list
-hostbraid site list --profile kinsta:ci
-hostbraid environment list --site-id SITE_ID
-hostbraid environment show --environment-id ENVIRONMENT_ID
+hb use kinsta:agency
+hb site list
+hb site list --profile kinsta:ci
+hb environment list --site-id SITE_ID
+hb environment show --environment-id ENVIRONMENT_ID
 ```
+
+Remove an exact local profile with `hb logout provider:name`. HostBraid asks for confirmation; use
+`--yes` only when the exact reference has already been reviewed. Logout removes the local profile
+metadata and any HostBraid-managed keyring credential, but it does not revoke the API token at the
+provider or remove an environment-backed token.
+
+```bash
+hb logout kinsta:ci
+```
+
+The canonical `hostbraid profile add|list|show|default|remove` and
+`hostbraid profile credential set` commands remain available. The short facade keeps the canonical
+machine identities: `login` is `profile.add`, `profiles` is `profile.list`, `use` is
+`profile.default`, and `logout` is `profile.remove` in JSON envelopes.
 
 Copy opaque IDs from catalog output. They are authoritative even when two resources have similar
 display names or domains.

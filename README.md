@@ -59,6 +59,10 @@ handoff suite.
 ## Current commands
 
 ```text
+hb login <provider> <name>              Add an account and make it the default
+hb profiles                             List configured provider accounts
+hb use <provider:name>                  Select the exact default account
+hb logout <provider:name>               Remove an exact account locally
 hostbraid profile add|list|show        Manage secret-free provider profiles
 hostbraid profile default|remove       Select or remove an exact profile
 hostbraid profile credential set       Replace and validate a credential source
@@ -72,6 +76,11 @@ hostbraid doctor                       Check local workflow dependencies
 hostbraid completion <shell>           Generate shell completion code
 ```
 
+The short account commands are an ergonomic facade over the canonical `profile` commands. The
+canonical commands remain available, and JSON output keeps their stable command identities:
+`login` emits `profile.add`, `profiles` emits `profile.list`, `use` emits `profile.default`, and
+`logout` emits `profile.remove`.
+
 `doctor` is a report: unavailable tools appear as booleans and warnings but do not make the command
 itself fail when the report was produced successfully.
 
@@ -83,22 +92,36 @@ emits a spinner or prompt.
 
 ## Kinsta quick start
 
-Add a profile interactively to save its validated token in the operating-system credential store:
+Log in interactively to save a validated token in the operating-system credential store. `login`
+creates the profile and always makes it the explicit default:
 
 ```bash
-hostbraid profile add kinsta agency --default
-hostbraid site list
-hostbraid environment list --site-id SITE_ID
-hostbraid environment show --environment-id ENVIRONMENT_ID
+hb login kinsta agency
+hb profiles
+hb site list
+hb environment list --site-id SITE_ID
+hb environment show --environment-id ENVIRONMENT_ID
 ```
 
 For CI, name the environment variable that HostBraid should resolve on each use. The token itself is
 never passed in argv or written to the profile configuration:
 
 ```bash
-hostbraid profile add kinsta ci --credential-env KINSTA_TOKEN
-hostbraid site list --profile kinsta:ci
+hb login kinsta ci --credential-env KINSTA_TOKEN
+hb site list --profile kinsta:ci
 ```
+
+Switch the default with an exact reference, or remove a local profile with confirmation:
+
+```bash
+hb use kinsta:agency
+hb logout kinsta:ci
+```
+
+`logout` removes HostBraid's local profile metadata and, when applicable, its HostBraid-managed
+keyring entry. It does not revoke the API token at the provider, and it does not unset or delete an
+environment-backed token. Revoke provider credentials in the provider's supported control plane
+when that is required.
 
 Open one exact environment or run one command on it:
 

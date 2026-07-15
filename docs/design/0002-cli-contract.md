@@ -111,10 +111,32 @@ Provider-backed success data uses these top-level shapes in schema version 1:
 Profile metadata may name an environment variable but never contains its value. Machine inventory
 always includes matching installation detail; `--details` only expands human output.
 
+## Account command facade
+
+The short account commands are a human-friendly facade over the canonical profile operations. They
+do not introduce new machine command identities or output shapes:
+
+| Facade | Canonical operation | Behavior |
+|---|---|---|
+| `login <provider> <name>` | `profile.add` | Creates the profile and always makes it the explicit default |
+| `profiles` | `profile.list` | Lists secret-free profile metadata without resolving credentials |
+| `use <provider:name>` | `profile.default` | Selects one exact profile as the default |
+| `logout <provider:name>` | `profile.remove` | Removes one exact local profile after confirmation |
+
+The full `profile` command tree remains public. Machine clients must interpret the canonical
+`command` field rather than infer an operation from the spelling used to invoke it.
+
+Logout is a local HostBraid operation. It removes profile metadata and attempts to remove a
+HostBraid-managed keyring credential, reporting the existing `credential_cleanup_failed` warning
+when cleanup fails. It does not revoke an API token at the provider and does not unset or delete an
+environment-backed token. Non-interactive logout requires the exact profile reference and
+`--yes`.
+
 ## Profile and selector rules
 
 - Provider profiles are exact `provider:name` references. Provider-backed commands use an explicit
   `--profile` or the configured default; no heuristic default is allowed.
+- `login` explicitly makes the newly created profile the default; this is not heuristic selection.
 - Exact opaque provider IDs are authoritative. Display names, domains, kinds, and labels are not
   substitutes for IDs.
 - Repeated values within an SSH selector category are ORed. Different categories are ANDed.

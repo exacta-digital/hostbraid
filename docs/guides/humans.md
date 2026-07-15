@@ -9,9 +9,18 @@ defaults:
 - `hostbraid search <word>` searches commands and the full guide text.
 - `hostbraid completion <shell>` integrates discovery into your shell.
 
-Provider profiles are selected exactly as `provider:name`. Set one explicit default with
-`hostbraid profile default kinsta:agency`, or pass `--profile kinsta:agency` to a provider-backed
-command. HostBraid does not infer a default merely because only one profile exists.
+Use `hb login kinsta agency` to create an account profile and select it as the explicit default.
+List configured accounts with `hb profiles`, and switch the default with an exact reference such as
+`hb use kinsta:agency`. You can also pass `--profile kinsta:agency` to one provider-backed command.
+HostBraid does not infer a default merely because only one profile exists.
+
+`hb logout kinsta:agency` removes that exact profile locally after confirmation. It removes a
+HostBraid-managed keyring entry when applicable, but it does not revoke the API token at the
+provider and does not unset or delete an environment-backed token. Use `--yes` only after reviewing
+the exact reference.
+
+The canonical `hostbraid profile ...` commands remain available for the complete profile-management
+surface, including secret-free metadata inspection and credential rotation.
 
 HostBraid uses the system OpenSSH client rather than asking you to maintain a second set of SSH keys
 and host fingerprints. Unknown or changed host keys remain visible decisions; they are never

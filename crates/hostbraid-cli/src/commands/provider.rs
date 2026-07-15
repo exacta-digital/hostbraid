@@ -35,6 +35,10 @@ use std::collections::VecDeque;
 
 pub(crate) async fn run(command: Commands, context: &Context) -> Result<CommandOutcome> {
     match command {
+        Commands::Login(arguments) => add_profile(arguments.into(), context).await,
+        Commands::Profiles => list_profiles(context),
+        Commands::Use(arguments) => set_default_profile(arguments, context),
+        Commands::Logout(arguments) => remove_profile(arguments, context),
         Commands::Profile(arguments) => run_profile(arguments.command, context).await,
         Commands::Site(arguments) => run_site(arguments.command, context).await,
         Commands::Environment(arguments) => run_environment(arguments.command, context).await,
@@ -152,7 +156,7 @@ fn list_profiles(context: &Context) -> Result<CommandOutcome> {
     }
     if data.profiles.is_empty() {
         output::write_human(
-            "No provider profiles are configured.\nAdd one with `hostbraid profile add kinsta <name>`.\n",
+            "No provider profiles are configured.\nLog in with `hb login kinsta <name>`.\n",
         )?;
         return Ok(CommandOutcome::Success);
     }

@@ -1,16 +1,20 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::time::Duration;
 
 const ABOUT: &str = "Bring every hosting environment within reach";
 const LONG_ABOUT: &str = "Bring every hosting environment within reach.\n\nHostBraid is a provider-neutral hosting environment CLI for WordPress professionals. It discovers sites and environments, delegates terminal access to OpenSSH, and will orchestrate explicit export and pull workflows without replacing WP-CLI.";
-const AFTER_HELP: &str = "Start here:\n  hostbraid guide getting-started\n  hostbraid doctor\n  hostbraid search ssh\n\nFor scripts and agents:\n  hostbraid --output json --no-input search environment\n\nHostBraid is an open-source project by It's Ed · https://itsed.se";
+const AFTER_HELP: &str = "Start here:\n  hb login kinsta <name>\n  hb guide getting-started\n  hb doctor\n  hb search ssh\n\nFor scripts and agents:\n  hb --output json --no-input search environment\n\nHostBraid is an open-source project by It's Ed · https://itsed.se";
+const LOGIN_AFTER_HELP: &str = "Login creates a validated profile and selects it for subsequent provider commands. Use `hostbraid profile add` when you want to configure a profile without switching to it.\n\nExamples:\n  hb login kinsta agency\n  printf '%s\\n' \"$KINSTA_TOKEN\" | hb login kinsta agency --token-stdin\n  hb login kinsta ci --credential-env KINSTA_TOKEN";
+const LOGOUT_AFTER_HELP: &str = "Logout removes HostBraid's local profile and any credential HostBraid saved in the OS credential store. It does not revoke provider-side API keys or unset credential environment variables.\n\nExample:\n  hb logout kinsta:agency";
+const PROFILE_AFTER_HELP: &str = "Common shortcuts:\n  hb login kinsta <name>  Create, validate, and select a profile\n  hb profiles             List profiles\n  hb use provider:name    Switch profiles\n  hb logout provider:name Forget a profile after confirmation";
+const PROFILE_ADD_AFTER_HELP: &str = "Examples:\n  hostbraid profile add kinsta agency\n  printf '%s\\n' \"$KINSTA_TOKEN\" | hostbraid profile add kinsta agency --token-stdin\n  hostbraid profile add kinsta ci --credential-env KINSTA_TOKEN";
 
 #[derive(Debug, Parser)]
 #[command(
     name = "hostbraid",
-    bin_name = "hostbraid",
     version,
     about = ABOUT,
     long_about = LONG_ABOUT,
@@ -54,7 +58,22 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
+    /// Log in to a provider and make the new profile active.
+    #[command(after_help = LOGIN_AFTER_HELP)]
+    Login(LoginArgs),
+
+    /// List the provider profiles available on this machine.
+    Profiles,
+
+    /// Switch the active provider profile.
+    Use(ProfileRefArgs),
+
+    /// Forget a local provider profile after confirmation.
+    #[command(after_help = LOGOUT_AFTER_HELP)]
+    Logout(ProfileRemoveArgs),
+
     /// Configure provider accounts without storing secrets in the profile file.
+    #[command(after_help = PROFILE_AFTER_HELP)]
     Profile(ProfileArgs),
 
     /// Discover sites in a configured provider account.
@@ -90,6 +109,10 @@ pub(crate) enum Commands {
 impl Commands {
     pub const fn machine_name(&self) -> &'static str {
         match self {
+            Self::Login(_) => "profile.add",
+            Self::Profiles => "profile.list",
+            Self::Use(_) => "profile.default",
+            Self::Logout(_) => "profile.remove",
             Self::Profile(arguments) => arguments.command.machine_name(),
             Self::Site(arguments) => arguments.command.machine_name(),
             Self::Environment(arguments) => arguments.command.machine_name(),
@@ -113,9 +136,7 @@ pub(crate) struct ProfileArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum ProfileCommand {
     /// Add and validate a provider profile.
-    #[command(
-        after_help = "Examples:\n  hostbraid profile add kinsta agency\n  printf '%s\\n' \"$KINSTA_TOKEN\" | hostbraid profile add kinsta agency --token-stdin\n  hostbraid profile add kinsta ci --credential-env KINSTA_TOKEN"
-    )]
+    #[command(after_help = PROFILE_ADD_AFTER_HELP)]
     Add(ProfileAddArgs),
 
     /// List configured profiles without resolving their credentials.
@@ -157,6 +178,36 @@ impl ProviderChoice {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Kinsta => "kinsta",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LoginArgs {
+    /// Compiled-in provider adapter.
+    #[arg(value_enum)]
+    pub provider: ProviderChoice,
+
+    /// Local profile name used in provider:name selectors.
+    pub name: String,
+
+    /// Read one API token from stdin and store it in the OS credential store.
+    #[arg(long, conflicts_with = "credential_env")]
+    pub token_stdin: bool,
+
+    /// Resolve the token from this named environment variable on every use.
+    #[arg(long, value_name = "NAME", conflicts_with = "token_stdin")]
+    pub credential_env: Option<String>,
+}
+
+impl From<LoginArgs> for ProfileAddArgs {
+    fn from(arguments: LoginArgs) -> Self {
+        Self {
+            provider: arguments.provider,
+            name: arguments.name,
+            token_stdin: arguments.token_stdin,
+            credential_env: arguments.credential_env,
+            default: true,
         }
     }
 }
@@ -527,8 +578,20 @@ pub enum ColorChoice {
     Never,
 }
 
+pub(crate) fn try_parse_from(arguments: &[OsString]) -> Result<Cli, clap::Error> {
+    let binary_name = arguments
+        .first()
+        .and_then(|argument| Path::new(argument).file_stem())
+        .filter(|name| *name == OsStr::new("hb"))
+        .map_or("hostbraid", |_| "hb");
+    let matches = Cli::command()
+        .bin_name(binary_name)
+        .try_get_matches_from(arguments)?;
+    Cli::from_arg_matches(&matches)
+}
+
 pub(crate) fn machine_output_requested(arguments: &[OsString]) -> bool {
-    if let Ok(cli) = Cli::try_parse_from(arguments) {
+    if let Ok(cli) = try_parse_from(arguments) {
         return cli.output.is_machine();
     }
 
@@ -750,5 +813,26 @@ fn requested_output(value: &str) -> Option<bool> {
         "json" => Some(true),
         "human" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LoginArgs, ProfileAddArgs, ProviderChoice};
+
+    #[test]
+    fn login_explicitly_selects_the_new_profile() {
+        let arguments = LoginArgs {
+            provider: ProviderChoice::Kinsta,
+            name: "agency".to_owned(),
+            token_stdin: false,
+            credential_env: Some("KINSTA_TOKEN".to_owned()),
+        };
+
+        let profile: ProfileAddArgs = arguments.into();
+
+        assert!(profile.default);
+        assert_eq!(profile.name, "agency");
+        assert_eq!(profile.credential_env.as_deref(), Some("KINSTA_TOKEN"));
     }
 }
